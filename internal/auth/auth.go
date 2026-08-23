@@ -50,6 +50,16 @@ func ValidateToken(token string) bool {
 	return true
 }
 
+// RevokeToken immediately invalidates an issued session token.
+func RevokeToken(token string) {
+	if token == "" {
+		return
+	}
+	mu.Lock()
+	delete(tokens, token)
+	mu.Unlock()
+}
+
 func HashPassword(password string) (string, error) {
 	bytes, err := bcrypt.GenerateFromPassword([]byte(password), 14)
 	return string(bytes), err

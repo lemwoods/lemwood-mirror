@@ -60,6 +60,9 @@ func (d *Downloader) DownloadLatest(ctx context.Context, launcher string, destBa
 			version = fmt.Sprintf("%d", rel.GetID())
 		}
 	}
+	if !isSafePathComponent(launcher) || !isSafePathComponent(version) {
+		return "", fmt.Errorf("launcher 或版本包含非法路径字符")
+	}
 	dir := filepath.Join(destBase, launcher, version)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("创建目录 %s 失败: %w", dir, err)
@@ -210,8 +213,15 @@ func getPublicIP() (string, error) {
 	return publicIP, nil
 }
 
+func isSafePathComponent(name string) bool {
+	return name != "" && name != "." && name != ".." && filepath.Base(name) == name && !strings.ContainsAny(name, `/\\`)
+}
+
 func (d *Downloader) downloadAsset(ctx context.Context, client *http.Client, asset *github.ReleaseAsset, dir, assetProxyURL string, xgetEnabled bool, xgetDomain string) error {
 	name := asset.GetName()
+	if !isSafePathComponent(name) {
+		return fmt.Errorf("资源文件名包含非法路径字符: %q", name)
+	}
 	outfile := filepath.Join(dir, name)
 
 	if fileInfo, err := os.Stat(outfile); err == nil {
@@ -245,25 +255,31 @@ func (d *Downloader) downloadAsset(ctx context.Context, client *http.Client, ass
 	}
 
 	var resp *http.Response
-	for i := 0; i < 3; i++ {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
 		resp, err = client.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			break
 		}
 		if resp != nil {
+			lastErr = fmt.Errorf("状态码: %d", resp.StatusCode)
 			resp.Body.Close()
+		} else {
+			lastErr = err
+		}
+		if attempt == 2 {
+			return fmt.Errorf("下载资源 %s 失败: %w", downloadURL, lastErr)
 		}
 		log.Printf("下载 %s 失败，5秒后重试...", downloadURL)
-		time.Sleep(5 * time.Second)
-	}
-	if err != nil {
-		return err
+		timer := time.NewTimer(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载资源 %s 失败，状态码: %d", downloadURL, resp.StatusCode)
-	}
 
 	f, err := os.Create(partial)
 	if err != nil {

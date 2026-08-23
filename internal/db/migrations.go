@@ -134,7 +134,7 @@ func runMigrations() error {
 // MySQL：建表已含所有列，no-op。
 // SQLite：检测 ip_blacklist 是否有 source 列，缺失则 ALTER TABLE ADD COLUMN。
 func migrateV1SchemaBaseline(d *sql.DB) error {
-	if isMySQL {
+	if isMySQL || isPostgres {
 		return nil
 	}
 
@@ -228,6 +228,73 @@ func migrateV6AggregateKeys(d *sql.DB) error {
 		}
 	}
 
+	// Rows written before aggregate_key was introduced must receive the same
+	// key as current writes. Without this backfill, old rows remain outside
+	// the upsert path and statistics become split across duplicate rows.
+	if tableExists(d, "visits") {
+		visitDate := "date(created_at)"
+		if isMySQL {
+			visitDate = "DATE_FORMAT(created_at, '%Y-%m-%d')"
+		} else if isPostgres {
+			visitDate = "TO_CHAR(created_at, 'YYYY-MM-DD')"
+		}
+		rows, err := d.Query("SELECT id, COALESCE(" + visitDate + ", ''), COALESCE(country, ''), COALESCE(region, ''), COALESCE(city, ''), COALESCE(aggregate_key, '') FROM visits")
+		if err != nil {
+			return fmt.Errorf("读取 visits 聚合键失败: %w", err)
+		}
+		var updates [][2]interface{}
+		for rows.Next() {
+			var id int64
+			var date, country, region, city, key string
+			if err := rows.Scan(&id, &date, &country, &region, &city, &key); err != nil {
+				rows.Close()
+				return err
+			}
+			if key == "" {
+				updates = append(updates, [2]interface{}{VisitAggregateKey(date, country, region, city), id})
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		for _, update := range updates {
+			if err := mergeVisitAggregateKey(d, update[0].(string), update[1].(int64)); err != nil {
+				return err
+			}
+		}
+	}
+	if tableExists(d, "download_events") {
+		rows, err := d.Query("SELECT id, COALESCE(date, ''), COALESCE(client_ip, ''), COALESCE(file_path, ''), COALESCE(launcher, ''), COALESCE(version, ''), COALESCE(country, ''), COALESCE(completed, 0), COALESCE(status_code, 0), COALESCE(aggregate_key, '') FROM download_events")
+		if err != nil {
+			return fmt.Errorf("读取 download_events 聚合键失败: %w", err)
+		}
+		var updates [][2]interface{}
+		for rows.Next() {
+			var id int64
+			var date, ip, path, launcher, version, country, key string
+			var completed, status int
+			if err := rows.Scan(&id, &date, &ip, &path, &launcher, &version, &country, &completed, &status, &key); err != nil {
+				rows.Close()
+				return err
+			}
+			if key == "" {
+				updates = append(updates, [2]interface{}{aggregateKey(date, ip, path, launcher, version, country, fmt.Sprintf("%d", completed), fmt.Sprintf("%d", status)), id})
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		for _, update := range updates {
+			if err := mergeDownloadAggregateKey(d, update[0].(string), update[1].(int64)); err != nil {
+				return err
+			}
+		}
+	}
+
 	indexQueries := make([]string, 0, 2)
 	if tableExists(d, "visits") {
 		indexQueries = append(indexQueries, "CREATE UNIQUE INDEX uq_visits_aggregate_key ON visits(aggregate_key)")
@@ -253,6 +320,40 @@ func migrateV6AggregateKeys(d *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func mergeVisitAggregateKey(d *sql.DB, key string, id int64) error {
+	var existing int64
+	err := d.QueryRow(rebind("SELECT id FROM visits WHERE aggregate_key=? AND id<>? LIMIT 1"), key, id).Scan(&existing)
+	if err == sql.ErrNoRows {
+		_, err = d.Exec(rebind("UPDATE visits SET aggregate_key=? WHERE id=?"), key, id)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = d.Exec(rebind("UPDATE visits SET visit_count=visit_count+(SELECT visit_count FROM visits WHERE id=?), aggregate_key=? WHERE id=?"), id, key, existing); err != nil {
+		return err
+	}
+	_, err = d.Exec(rebind("DELETE FROM visits WHERE id=?"), id)
+	return err
+}
+
+func mergeDownloadAggregateKey(d *sql.DB, key string, id int64) error {
+	var existing int64
+	err := d.QueryRow(rebind("SELECT id FROM download_events WHERE aggregate_key=? AND id<>? LIMIT 1"), key, id).Scan(&existing)
+	if err == sql.ErrNoRows {
+		_, err = d.Exec(rebind("UPDATE download_events SET aggregate_key=? WHERE id=?"), key, id)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = d.Exec(rebind("UPDATE download_events SET bytes_served=bytes_served+(SELECT bytes_served FROM download_events WHERE id=?), event_count=event_count+(SELECT event_count FROM download_events WHERE id=?), aggregate_key=? WHERE id=?"), id, id, key, existing); err != nil {
+		return err
+	}
+	_, err = d.Exec(rebind("DELETE FROM download_events WHERE id=?"), id)
+	return err
 }
 
 func tableExists(d *sql.DB, table string) bool {

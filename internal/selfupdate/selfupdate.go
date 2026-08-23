@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -34,6 +35,11 @@ const (
 // DefaultRepoURL 是 self_update_repo_url 留空时回退使用的默认更新源
 // （本项目自身仓库）。允许 fork 维护者在配置中显式指定自己的仓库地址覆盖。
 const DefaultRepoURL = "https://github.com/NingZeStudio/lemwood-mirror"
+
+const (
+	maxUpdateDownloadSize  = 200 << 20
+	maxExtractedBinarySize = 200 << 20
+)
 
 // effectiveRepoURL 返回实际生效的更新源仓库地址：留空时回退到 DefaultRepoURL。
 func effectiveRepoURL(raw string) string {
@@ -494,6 +500,9 @@ func downloadAndReplace(ctx context.Context, httpClient *http.Client, downloadUR
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("下载返回状态码 %d", resp.StatusCode)
 	}
+	if resp.ContentLength > maxUpdateDownloadSize {
+		return fmt.Errorf("更新文件过大: %d bytes (上限 %d)", resp.ContentLength, maxUpdateDownloadSize)
+	}
 
 	tmpFile := targetPath + ".download"
 	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
@@ -503,10 +512,10 @@ func downloadAndReplace(ctx context.Context, httpClient *http.Client, downloadUR
 	defer os.Remove(tmpFile)
 
 	bufWriter := bufio.NewWriterSize(f, 64*1024)
-	written, err := io.Copy(bufWriter, io.TeeReader(resp.Body, &progressTracker{
+	written, err := io.Copy(bufWriter, io.LimitReader(io.TeeReader(resp.Body, &progressTracker{
 		total:    resp.ContentLength,
 		fileName: assetName,
-	}))
+	}), maxUpdateDownloadSize+1))
 	if err != nil {
 		f.Close()
 		return fmt.Errorf("下载写入失败: %w", err)
@@ -519,6 +528,9 @@ func downloadAndReplace(ctx context.Context, httpClient *http.Client, downloadUR
 		return fmt.Errorf("关闭临时文件失败: %w", err)
 	}
 
+	if written > maxUpdateDownloadSize {
+		return fmt.Errorf("更新文件过大: %d bytes (上限 %d)", written, maxUpdateDownloadSize)
+	}
 	if resp.ContentLength > 0 && written != resp.ContentLength {
 		return fmt.Errorf("下载字节数不匹配: 期望 %d, 实际 %d", resp.ContentLength, written)
 	}
@@ -539,6 +551,9 @@ func downloadAndReplace(ctx context.Context, httpClient *http.Client, downloadUR
 	}
 	defer os.Remove(tmpBin)
 
+	if err := validateBinaryFile(tmpBin); err != nil {
+		return fmt.Errorf("更新文件完整性校验失败: %w", err)
+	}
 	if err := os.Chmod(tmpBin, 0o755); err != nil {
 		return fmt.Errorf("设置执行权限失败: %w", err)
 	}
@@ -551,11 +566,41 @@ func downloadAndReplace(ctx context.Context, httpClient *http.Client, downloadUR
 	return nil
 }
 
+func validateBinaryFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var header [4]byte
+	if _, err := io.ReadFull(f, header[:]); err != nil {
+		return fmt.Errorf("读取文件头失败: %w", err)
+	}
+	if string(header[:2]) == "MZ" || binary.BigEndian.Uint32(header[:]) == 0x7f454c46 ||
+		binary.BigEndian.Uint32(header[:]) == 0xfeedface || binary.BigEndian.Uint32(header[:]) == 0xfeedfacf ||
+		binary.LittleEndian.Uint32(header[:]) == 0xcefaedfe || binary.LittleEndian.Uint32(header[:]) == 0xcffaedfe {
+		return nil
+	}
+	return fmt.Errorf("不是受支持的可执行文件格式")
+}
+
 func extractBinaryFromArchive(archivePath string) (string, error) {
 	if strings.HasSuffix(archivePath, ".zip") {
 		return extractFromZip(archivePath)
 	}
 	return extractFromTarGz(archivePath)
+}
+
+func isSafeArchivePath(name string) bool {
+	if name == "" || filepath.IsAbs(name) || strings.ContainsAny(name, `\\`) {
+		return false
+	}
+	for _, part := range strings.FieldsFunc(name, func(r rune) bool { return r == '/' || r == filepath.Separator }) {
+		if part == ".." {
+			return false
+		}
+	}
+	return filepath.IsLocal(name)
 }
 
 func isExtractableBinary(name string) bool {
@@ -600,7 +645,7 @@ func extractFromTarGz(tgzPath string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if strings.Contains(header.Name, "..") || !filepath.IsLocal(header.Name) {
+		if !isSafeArchivePath(header.Name) {
 			continue
 		}
 		if header.Typeflag == tar.TypeReg {
@@ -614,7 +659,7 @@ func extractFromTarGz(tgzPath string) (string, error) {
 				return "", err
 			}
 			defer out.Close()
-			if _, err := io.Copy(out, tarReader); err != nil {
+			if written, err := io.Copy(out, io.LimitReader(tarReader, maxExtractedBinarySize+1)); err != nil || written > maxExtractedBinarySize {
 				out.Close()
 				os.Remove(outPath)
 				return "", err
@@ -634,10 +679,19 @@ func extractFromZip(zipPath string) (string, error) {
 	defer r.Close()
 
 	for _, f := range r.File {
-		if f.FileInfo().IsDir() {
+		info := f.FileInfo()
+		if info.IsDir() {
 			continue
 		}
-		if strings.Contains(f.Name, "..") || !filepath.IsLocal(f.Name) {
+		// ZIP symlinks can redirect extraction outside the temporary archive
+		// path; never open or extract them as regular files.
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if f.UncompressedSize64 > maxExtractedBinarySize {
+			return "", fmt.Errorf("压缩包中的可执行文件超过 %d 字节限制", maxExtractedBinarySize)
+		}
+		if !isSafeArchivePath(f.Name) {
 			continue
 		}
 		name := filepath.Base(f.Name)
@@ -654,7 +708,8 @@ func extractFromZip(zipPath string) (string, error) {
 			rc.Close()
 			return "", err
 		}
-		if _, err := io.Copy(out, rc); err != nil {
+		_, err = io.Copy(out, io.LimitReader(rc, maxExtractedBinarySize+1))
+		if err != nil {
 			out.Close()
 			rc.Close()
 			os.Remove(outPath)

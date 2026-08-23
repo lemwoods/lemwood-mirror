@@ -439,50 +439,37 @@ func (s *State) Routes(mux *http.ServeMux) {
 			return
 		}
 
-		// 校验授权（TTL 内可多次使用，不单次消费）：
-		// Chrome/Android 会拦截非用户手势触发的自动下载，用户随后会点真实按钮重试，
-		// 因此 token 在有效期内可重复用于下载（对齐 MapleMirror 按过期+max_bytes 绑定）。
 		var auth db.DownloadAuthorization
 		if token != "" {
-			validated, ok := s.authzMgr.Peek(token)
+			validated, ok := s.authzMgr.Consume(token)
 			if !ok {
 				if isBrowserRequest(r) && s.Config.PowEnabled {
 					http.Redirect(w, r, "/verify?file="+url.QueryEscape(relPath), http.StatusFound)
 					return
 				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"error":   "invalid_token",
-					"message": "Download token is invalid or expired",
-				})
+				writeJSONError(w, http.StatusForbidden, "invalid_token", "Download token is invalid or expired")
 				return
 			}
 			auth = validated
-
-			// 文件绑定校验：授权绑定的路径必须与请求路径一致
 			if auth.FilePath != relPath {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"error":   "token_mismatch",
-					"message": "Download token does not match requested file",
-				})
+				writeJSONError(w, http.StatusForbidden, "token_mismatch", "Download token does not match requested file")
 				return
 			}
 		}
 
 		fullPath := filepath.Join(s.BasePath, relPath)
 		cleanPath := filepath.Clean(fullPath)
-
-		// 验证路径是否在 BasePath 内
-		absBase, _ := filepath.Abs(s.BasePath)
-		absPath, _ := filepath.Abs(cleanPath)
-		if !strings.HasPrefix(absPath, absBase) {
+		if !pathWithinBase(s.BasePath, cleanPath) {
 			log.Printf("安全警告：拦截到来自 %s 的路径逃逸尝试，请求路径：%s", r.RemoteAddr, path)
 			http.NotFound(w, r)
 			return
 		}
+		resolvedPath, err := filepath.EvalSymlinks(cleanPath)
+		if err != nil || !pathWithinBase(s.BasePath, resolvedPath) {
+			http.NotFound(w, r)
+			return
+		}
+		cleanPath = resolvedPath
 
 		// 检查是否为目录
 		info, err := os.Stat(cleanPath)
@@ -500,7 +487,6 @@ func (s *State) Routes(mux *http.ServeMux) {
 			http.NotFound(w, r)
 			return
 		}
-
 		clientIP := netutil.ExtractClientIP(r)
 
 		switch r.Method {
@@ -605,6 +591,7 @@ func (s *State) Routes(mux *http.ServeMux) {
 
 	// 认证 + 扫描（v2 admin 中间件，返回信封格式错误）
 	mux.Handle("/api/v2/auth/login", s.v2AdminSwitchMiddleware(http.HandlerFunc(s.handleV2Login)))
+	mux.Handle("/api/v2/auth/logout", s.v2AdminSwitchMiddleware(http.HandlerFunc(s.handleV2Logout)))
 	mux.Handle("/api/v2/admin/scans", s.v2AdminSwitchMiddleware(http.HandlerFunc(s.v2AdminMiddleware(s.handleV2ScanAll))))
 	mux.Handle("/api/v2/admin/scans/launcher", s.v2AdminSwitchMiddleware(http.HandlerFunc(s.v2AdminMiddleware(s.handleV2ScanLauncher))))
 
@@ -731,13 +718,8 @@ func SecurityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 
-		// CORS Headers — 根据 Origin 动态设置，而非通配符 *
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			// API 端点允许跨域，静态资源同源访问无 Origin 头不受影响
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		}
+		// Public API: callers may access it from any origin.
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Expose-Headers", "X-Latest-Version, X-Latest-Versions")
@@ -968,9 +950,7 @@ func writeJSONError(w http.ResponseWriter, statusCode int, code, message string)
 func (s *State) validateDownloadFile(filePath string) (string, os.FileInfo, *downloadValidationError) {
 	fullPath := filepath.Join(s.BasePath, filePath)
 	cleanPath := filepath.Clean(fullPath)
-	absBase, _ := filepath.Abs(s.BasePath)
-	absPath, _ := filepath.Abs(cleanPath)
-	if !strings.HasPrefix(absPath, absBase) {
+	if !pathWithinBase(s.BasePath, cleanPath) {
 		return "", nil, &downloadValidationError{
 			StatusCode: http.StatusForbidden,
 			Code:       "invalid_path",
@@ -988,6 +968,22 @@ func (s *State) validateDownloadFile(filePath string) (string, os.FileInfo, *dow
 	}
 
 	return cleanPath, info, nil
+}
+
+func pathWithinBase(basePath, targetPath string) bool {
+	base, err := filepath.Abs(basePath)
+	if err != nil {
+		return false
+	}
+	target, err := filepath.Abs(targetPath)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(base, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+	return rel != "."
 }
 
 // issueAuthz 签发一条 DB 授权并返回响应。明文 token 仅在响应中返回一次。

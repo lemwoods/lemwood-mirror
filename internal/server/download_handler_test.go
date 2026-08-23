@@ -495,14 +495,11 @@ func TestPowChallengeAuthorizeFlow(t *testing.T) {
 		t.Fatalf("download body = %q, want %q", dlRec.Body.String(), "hello")
 	}
 
-	// 5. token 在有效期内可多次使用（非单次消费）——重放应仍成功
+	// 5. token 是单次消费授权；重放必须被拒绝。
 	dlRec2 := httptest.NewRecorder()
 	handler.ServeHTTP(dlRec2, dlReq)
-	if dlRec2.Code != http.StatusOK {
-		t.Fatalf("replay status = %d, want 200 (multi-use within TTL)", dlRec2.Code)
-	}
-	if dlRec2.Body.String() != "hello" {
-		t.Fatalf("replay body = %q, want %q", dlRec2.Body.String(), "hello")
+	if dlRec2.Code != http.StatusForbidden {
+		t.Fatalf("replay status = %d, want 403 (single-use authorization)", dlRec2.Code)
 	}
 }
 
@@ -586,4 +583,14 @@ func decodeChallengeParams(t *testing.T, challenge map[string]any) pow.Challenge
 		t.Fatalf("unmarshal params: %v", err)
 	}
 	return p
+}
+
+func TestPathWithinBaseRejectsPrefixSibling(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "releases")
+	if pathWithinBase(base, base+"2") {
+		t.Fatal("pathWithinBase accepted sibling path with shared prefix")
+	}
+	if !pathWithinBase(base, filepath.Join(base, "launcher", "file.txt")) {
+		t.Fatal("pathWithinBase rejected child path")
+	}
 }

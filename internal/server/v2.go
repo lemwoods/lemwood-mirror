@@ -424,6 +424,23 @@ func (s *State) processLogin(r *http.Request) loginOutcome {
 	return loginOutcome{Token: token}
 }
 
+// handleV2Logout revokes the current administrator session.
+func (s *State) handleV2Logout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeV2Error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method Not Allowed", nil)
+		return
+	}
+	value := r.Header.Get("Authorization")
+	if strings.HasPrefix(value, "Bearer ") {
+		auth.RevokeToken(strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")))
+	}
+	if cookie, err := r.Cookie("admin_token"); err == nil {
+		auth.RevokeToken(cookie.Value)
+		http.SetCookie(w, &http.Cookie{Name: "admin_token", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode})
+	}
+	writeV2Success(w, r, map[string]bool{"revoked": true}, false)
+}
+
 // handleV2Login 管理员登录（信封包裹）。
 func (s *State) handleV2Login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

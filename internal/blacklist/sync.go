@@ -2,6 +2,7 @@ package blacklist
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"lemwood_mirror/internal/db"
 	"log"
@@ -12,9 +13,10 @@ import (
 )
 
 var (
-	externalIPs     map[string]bool
-	externalIPsMu   sync.RWMutex
-	lastSyncTime    time.Time
+	externalIPs   map[string]bool
+	externalIPsMu sync.RWMutex
+	lastSyncTime  time.Time
+	syncMu        sync.Mutex
 )
 
 func init() {
@@ -25,6 +27,9 @@ func SyncExternalBlacklist(url string) error {
 	if url == "" {
 		return nil
 	}
+
+	syncMu.Lock()
+	defer syncMu.Unlock()
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -37,8 +42,7 @@ func SyncExternalBlacklist(url string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[黑名单同步] 获取外部黑名单失败，状态码: %d", resp.StatusCode)
-		return nil
+		return fmt.Errorf("获取外部黑名单失败，状态码: %d", resp.StatusCode)
 	}
 
 	var ips []string

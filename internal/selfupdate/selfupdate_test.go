@@ -1,9 +1,12 @@
 package selfupdate
 
 import (
+	"archive/zip"
+	"lemwood_mirror/internal/version"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
-	"lemwood_mirror/internal/version"
 	"testing"
 )
 
@@ -185,6 +188,54 @@ func TestBuildUpdateCandidates(t *testing.T) {
 	// 无效仓库地址应报错
 	if _, err := buildUpdateCandidates("not-a-url", "v1.0", ""); err == nil {
 		t.Fatal("buildUpdateCandidates with invalid repo should return error")
+	}
+}
+
+func TestExtractFromZipRejectsSymlinkAndUnsafeEntries(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "update.zip")
+	f, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	for _, name := range []string{"../../escape", "README.txt"} {
+		w, err := zw.Create(name)
+		if err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte("not executable")); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+	}
+	// Mark the entry as a symlink through external attributes. Its target
+	// must never be extracted as the update binary.
+	h := &zip.FileHeader{Name: "mirror-linux-amd64", Method: zip.Store}
+	h.SetMode(os.ModeSymlink | 0o777)
+	w, err := zw.CreateHeader(h)
+	if err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("../../escape")); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := extractFromZip(archivePath); err == nil {
+		t.Fatal("expected ZIP without a regular executable to be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "escape")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe entry escaped extraction directory: err=%v", err)
 	}
 }
 

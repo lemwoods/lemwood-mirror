@@ -304,8 +304,6 @@ func createTables() error {
 			`ALTER TABLE download_events ADD COLUMN IF NOT EXISTS event_count BIGINT NOT NULL DEFAULT 1`,
 			`ALTER TABLE visits ADD COLUMN IF NOT EXISTS aggregate_key TEXT`,
 			`ALTER TABLE download_events ADD COLUMN IF NOT EXISTS aggregate_key TEXT`,
-			`CREATE UNIQUE INDEX IF NOT EXISTS uq_visits_aggregate_key ON visits(aggregate_key)`,
-			`CREATE UNIQUE INDEX IF NOT EXISTS uq_dlevents_aggregate_key ON download_events(aggregate_key)`,
 		} {
 			if _, err := DB.Exec(query); err != nil {
 				return fmt.Errorf("补充 PostgreSQL 统计计数列失败: %w, query: %s", err, query)
@@ -315,9 +313,7 @@ func createTables() error {
 		if _, err := DB.Exec(`INSERT INTO system_info ("key", value) VALUES ($1, $2) ON CONFLICT ("key") DO NOTHING`, "start_time", startTime); err != nil {
 			return fmt.Errorf("记录系统启动时间失败: %w", err)
 		}
-		if _, err := DB.Exec(`INSERT INTO system_info ("key", value) VALUES ($1, $2) ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value`, "schema_version", fmt.Sprintf("%d", CurrentSchemaVersion)); err != nil {
-			return fmt.Errorf("记录 PostgreSQL schema 版本失败: %w", err)
-		}
+		// schema_version 由下方统一的 runMigrations 逐版本写入。
 		return nil
 	}
 	var queries []string

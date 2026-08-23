@@ -33,13 +33,16 @@ import (
 )
 
 const (
-	AlgorithmPBKDF2 = "PBKDF2-SHA256"
-	defaultCost     = 5000
-	defaultKeyLen   = 32
-	defaultDifficulty = 14 // 前导零位数；~16K 次 PBKDF2 期望迭代
-	defaultTTL      = 2 * time.Minute
-	saltLen         = 16
-	nonceLen        = 16
+	AlgorithmPBKDF2                   = "PBKDF2-SHA256"
+	defaultCost                       = 5000
+	defaultKeyLen                     = 32
+	defaultDifficulty                 = 14 // 前导零位数；~16K 次 PBKDF2 期望迭代
+	defaultTTL                        = 2 * time.Minute
+	defaultMaxChallenges              = 4096
+	defaultMaxChallengesPerIP         = 8
+	defaultMaxConcurrentVerifications = 4
+	saltLen                           = 16
+	nonceLen                          = 16
 )
 
 // 错误哨兵。
@@ -54,15 +57,19 @@ var (
 
 // Manager 管理内存中的 PoW 挑战。线程安全。
 type Manager struct {
-	secret     []byte
-	algorithm  string
-	cost       int
-	keyLength  int
-	difficulty int
-	ttl        time.Duration
+	secret             []byte
+	algorithm          string
+	cost               int
+	keyLength          int
+	difficulty         int
+	ttl                time.Duration
+	maxChallenges      int
+	maxChallengesPerIP int
+	verifySlots        chan struct{}
 
 	mu         sync.Mutex
 	challenges map[string]*entry
+	byIP       map[string]int
 	stop       chan struct{}
 }
 
@@ -108,24 +115,31 @@ type Payload struct {
 
 // Config 配置 PoW 管理器。
 type Config struct {
-	Secret     string // HMAC 签名密钥（hex 或任意字符串）
-	Cost       int    // PBKDF2 迭代数；<=0 用默认
-	KeyLength  int    // 派生密钥字节数；<=0 用默认
-	Difficulty int    // 前导零位数；<=0 用默认
-	TTL        time.Duration // 挑战有效期；<=0 用默认
+	Secret                     string        // HMAC 签名密钥（hex 或任意字符串）
+	Cost                       int           // PBKDF2 迭代数；<=0 用默认
+	KeyLength                  int           // 派生密钥字节数；<=0 用默认
+	Difficulty                 int           // 前导零位数；<=0 用默认
+	TTL                        time.Duration // 挑战有效期；<=0 用默认
+	MaxChallenges              int           // 内存中最大挑战数；<=0 用默认
+	MaxChallengesPerIP         int           // 单 IP 最大未消费挑战数；<=0 用默认
+	MaxConcurrentVerifications int           // 并发 PBKDF2 校验上限；<=0 用默认
 }
 
 // NewManager 创建管理器并启动过期清理协程。
 func NewManager(cfg Config) *Manager {
 	m := &Manager{
-		secret:     []byte(cfg.Secret),
-		algorithm:  AlgorithmPBKDF2,
-		cost:       defaultCost,
-		keyLength:  defaultKeyLen,
-		difficulty: defaultDifficulty,
-		ttl:        defaultTTL,
-		challenges: make(map[string]*entry),
-		stop:       make(chan struct{}),
+		secret:             []byte(cfg.Secret),
+		algorithm:          AlgorithmPBKDF2,
+		cost:               defaultCost,
+		keyLength:          defaultKeyLen,
+		difficulty:         defaultDifficulty,
+		ttl:                defaultTTL,
+		maxChallenges:      defaultMaxChallenges,
+		maxChallengesPerIP: defaultMaxChallengesPerIP,
+		verifySlots:        make(chan struct{}, defaultMaxConcurrentVerifications),
+		challenges:         make(map[string]*entry),
+		byIP:               make(map[string]int),
+		stop:               make(chan struct{}),
 	}
 	if cfg.Cost > 0 {
 		m.cost = cfg.Cost
@@ -138,6 +152,15 @@ func NewManager(cfg Config) *Manager {
 	}
 	if cfg.TTL > 0 {
 		m.ttl = cfg.TTL
+	}
+	if cfg.MaxChallenges > 0 {
+		m.maxChallenges = cfg.MaxChallenges
+	}
+	if cfg.MaxChallengesPerIP > 0 {
+		m.maxChallengesPerIP = cfg.MaxChallengesPerIP
+	}
+	if cfg.MaxConcurrentVerifications > 0 {
+		m.verifySlots = make(chan struct{}, cfg.MaxConcurrentVerifications)
 	}
 	go m.cleanupLoop()
 	return m
@@ -187,6 +210,10 @@ func (m *Manager) CreateChallenge(filePath, clientIP, sourceKind string) (Challe
 	ch := Challenge{Parameters: params, Signature: sig}
 
 	m.mu.Lock()
+	if len(m.challenges) >= m.maxChallenges || m.byIP[clientIP] >= m.maxChallengesPerIP {
+		m.mu.Unlock()
+		return Challenge{}, errors.New("pow: challenge rate limit exceeded")
+	}
 	m.challenges[nonceHex] = &entry{
 		params:     params,
 		filePath:   filePath,
@@ -196,6 +223,7 @@ func (m *Manager) CreateChallenge(filePath, clientIP, sourceKind string) (Challe
 		createdAt:  now,
 		expiresAt:  expires,
 	}
+	m.byIP[clientIP]++
 	m.mu.Unlock()
 
 	return ch, nil
@@ -253,7 +281,7 @@ func (m *Manager) VerifyAndConsume(payload Payload, filePath string) error {
 		return ErrChallengeConsumed
 	}
 	if time.Now().After(e.expiresAt) {
-		e.state = "consumed" // 过期即清理，不再可用
+		m.removeLocked(nonce)
 		m.mu.Unlock()
 		return ErrChallengeExpired
 	}
@@ -267,6 +295,15 @@ func (m *Manager) VerifyAndConsume(payload Payload, filePath string) error {
 	m.mu.Unlock()
 
 	// 2. 重算 PBKDF2 并校验前导零位数（大整数计算不在锁内）
+	select {
+	case m.verifySlots <- struct{}{}:
+		defer func() { <-m.verifySlots }()
+	default:
+		m.mu.Lock()
+		e.state = "open"
+		m.mu.Unlock()
+		return errors.New("pow: verification rate limit exceeded")
+	}
 	valid := m.verifySolution(payload.Challenge.Parameters, payload.Solution)
 
 	m.mu.Lock()
@@ -346,11 +383,24 @@ func (m *Manager) cleanupLoop() {
 			now := time.Now()
 			for id, e := range m.challenges {
 				if now.After(e.expiresAt) || e.state == "consumed" {
-					delete(m.challenges, id)
+					m.removeLocked(id)
 				}
 			}
 			m.mu.Unlock()
 		}
+	}
+}
+
+func (m *Manager) removeLocked(id string) {
+	e, ok := m.challenges[id]
+	if !ok {
+		return
+	}
+	delete(m.challenges, id)
+	if m.byIP[e.clientIP] > 1 {
+		m.byIP[e.clientIP]--
+	} else {
+		delete(m.byIP, e.clientIP)
 	}
 }
 
