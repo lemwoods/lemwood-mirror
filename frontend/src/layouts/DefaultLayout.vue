@@ -15,6 +15,7 @@ import {
 import { cn } from '@/lib/utils'
 import { isNavigationActive, navigationLinks } from '@/lib/navigation'
 import { globalConfig } from '@/lib/globalConfig'
+import { getStoredItem, setStoredItem, removeStoredItem } from '@/lib/safeStorage'
 
 const route = useRoute()
 
@@ -26,7 +27,7 @@ const isThemePanelOpen = ref(false)
 const setDark = (val) => {
   isDark.value = val
   document.documentElement.classList.toggle('dark', val)
-  localStorage.setItem(darkMode, val ? 'dark' : 'light')
+  setStoredItem(darkMode, val ? 'dark' : 'light')
 }
 
 const toggleDark = () => setDark(!isDark.value)
@@ -44,17 +45,17 @@ const colorOptions = globalConfig.theme.colors.map(c => ({
   })[c.value] || 'bg-zinc-500'
 }))
 
-const selectedColor = ref(localStorage.getItem(themeColor) || globalConfig.theme.defaultColor)
+const selectedColor = ref(getStoredItem(themeColor) || globalConfig.theme.defaultColor)
 
 const applyThemeColor = (color) => {
   selectedColor.value = color
-  localStorage.setItem(themeColor, color)
+  setStoredItem(themeColor, color)
   document.documentElement.setAttribute('data-theme-color', color)
 }
 
 const resetThemeSettings = () => {
-  localStorage.removeItem(themeColor)
-  localStorage.removeItem(darkMode)
+  removeStoredItem(themeColor)
+  removeStoredItem(darkMode)
   document.documentElement.removeAttribute('data-theme-color')
   selectedColor.value = globalConfig.theme.defaultColor
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -62,7 +63,7 @@ const resetThemeSettings = () => {
 }
 
 onMounted(() => {
-  const stored = localStorage.getItem(darkMode)
+  const stored = getStoredItem(darkMode)
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
   setDark(stored === 'dark' || (!stored && prefersDark))
 })

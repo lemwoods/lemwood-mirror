@@ -99,6 +99,87 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 	return d
 }
 
+// Conf 返回当前配置快照。后台保存会整体替换 s.Config，
+// 读侧一律经此获取，避免与保存路径产生数据竞争。
+func (s *State) Conf() *config.Config {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Config
+}
+
+// POW 返回当前 PoW 管理器；nil 表示未启用。管理器在配置保存时可被整体替换。
+func (s *State) POW() *pow.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.powMgr
+}
+
+// AUTHZ 返回当前下载授权管理器。管理器在配置保存时可被整体替换。
+func (s *State) AUTHZ() *download_authz.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.authzMgr
+}
+
+// pathRelWithin 判断 target 是否位于 base 目录内（含 base 本身）。
+func pathRelWithin(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// resolveStoragePath 把面向用户的相对路径安全解析为真实绝对路径：
+//   - 文本级穿越（../）直接拒绝；
+//   - 已存在部分经 EvalSymlinks 解析后必须仍落在 BasePath 内（防符号链接逃逸）；
+//   - 目标不存在（如上传新文件）时按最近存在祖先解析校验后拼接。
+//
+// 返回值为 (解析后的绝对路径, 是否合法)。
+func (s *State) resolveStoragePath(rel string) (string, bool) {
+	absBase, err := filepath.Abs(s.BasePath)
+	if err != nil {
+		return "", false
+	}
+	baseReal, err := filepath.EvalSymlinks(absBase)
+	if err != nil {
+		return "", false
+	}
+	clean := filepath.Clean(filepath.Join(absBase, rel))
+	if !pathRelWithin(absBase, clean) {
+		return "", false
+	}
+	if _, err := os.Lstat(clean); err == nil {
+		real, err := filepath.EvalSymlinks(clean)
+		if err != nil || !pathRelWithin(baseReal, real) {
+			return "", false
+		}
+		return real, true
+	}
+	// 目标不存在：找最近的存在祖先并校验其真实位置
+	cur := filepath.Dir(clean)
+	for cur != absBase {
+		realDir, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			if !pathRelWithin(baseReal, realDir) {
+				return "", false
+			}
+			suffix, err := filepath.Rel(cur, clean)
+			if err != nil {
+				return "", false
+			}
+			return filepath.Join(realDir, suffix), true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	suffix, err := filepath.Rel(absBase, clean)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Join(baseReal, suffix), true
+}
+
 func (s *State) SetSelfUpdateManager(manager *selfupdate.Manager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -291,7 +372,7 @@ func (s *State) clearLatestFlag(infoPath string) error {
 
 func (s *State) AdminSwitchMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.Config.AdminEnabled {
+		if !s.Conf().AdminEnabled {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				http.Error(w, "Admin console is disabled", http.StatusForbidden)
 			} else {
@@ -400,6 +481,7 @@ func (s *State) Routes(mux *http.ServeMux) {
 
 	// 下载 - PoW/授权安全处理器
 	mux.HandleFunc("/download/", func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.Conf()
 		path := r.URL.Path
 		if containsDotDot(path) {
 			http.NotFound(w, r)
@@ -423,7 +505,7 @@ func (s *State) Routes(mux *http.ServeMux) {
 
 		// 无 token 且 PoW 开启：浏览器走 PoW 验证页，非浏览器返回 JSON 引导走 API PoW 链路。
 		// PoW 关闭时无 token 直接放行（无门控，等同旧 captcha_enabled=false 行为）。
-		if token == "" && s.Config.PowEnabled {
+		if token == "" && cfg.PowEnabled {
 			if isBrowserRequest(r) {
 				http.Redirect(w, r, "/verify?file="+url.QueryEscape(relPath), http.StatusFound)
 				return
@@ -437,24 +519,6 @@ func (s *State) Routes(mux *http.ServeMux) {
 				"challenge_endpoint": "/api/v2/downloads/challenge",
 			})
 			return
-		}
-
-		var auth db.DownloadAuthorization
-		if token != "" {
-			validated, ok := s.authzMgr.Consume(token)
-			if !ok {
-				if isBrowserRequest(r) && s.Config.PowEnabled {
-					http.Redirect(w, r, "/verify?file="+url.QueryEscape(relPath), http.StatusFound)
-					return
-				}
-				writeJSONError(w, http.StatusForbidden, "invalid_token", "Download token is invalid or expired")
-				return
-			}
-			auth = validated
-			if auth.FilePath != relPath {
-				writeJSONError(w, http.StatusForbidden, "token_mismatch", "Download token does not match requested file")
-				return
-			}
 		}
 
 		fullPath := filepath.Join(s.BasePath, relPath)
@@ -506,12 +570,42 @@ func (s *State) Routes(mux *http.ServeMux) {
 			if message == "" {
 				message = "已超过当日下载流量限制"
 			}
-			if s.Config.AppealContact != "" {
-				message = fmt.Sprintf("%s，如有误封请联系 %s", message, s.Config.AppealContact)
+			if cfg.AppealContact != "" {
+				message = fmt.Sprintf("%s，如有误封请联系 %s", message, cfg.AppealContact)
 			}
 			http.Error(w, message, http.StatusForbidden)
 			log.Printf("[防刷墙] 拒绝下载请求: ip=%s path=%s projected=%.2fGB reason=%s", clientIP, relPath, traffic.ToGB(projectedBytes), reason)
 			return
+		}
+
+		var auth db.DownloadAuthorization
+		if token != "" {
+			// 先 Peek 做绑定校验（不消耗），全部通过后再原子消费，
+			// 避免 404/405/超配额/路径不匹配请求烧掉一次性授权。
+			peeked, ok := s.AUTHZ().Peek(token)
+			if !ok {
+				if isBrowserRequest(r) && cfg.PowEnabled {
+					http.Redirect(w, r, "/verify?file="+url.QueryEscape(relPath), http.StatusFound)
+					return
+				}
+				writeJSONError(w, http.StatusForbidden, "invalid_token", "Download token is invalid or expired")
+				return
+			}
+			if peeked.FilePath != relPath {
+				traffic.FinalizeTraffic(clientIP, estimatedBytes, 0) // 释放预扣流量
+				writeJSONError(w, http.StatusForbidden, "token_mismatch", "Download token does not match requested file")
+				return
+			}
+			consumed, ok := s.AUTHZ().Consume(token)
+			if !ok {
+				if isBrowserRequest(r) && cfg.PowEnabled {
+					http.Redirect(w, r, "/verify?file="+url.QueryEscape(relPath), http.StatusFound)
+					return
+				}
+				writeJSONError(w, http.StatusForbidden, "invalid_token", "Download token is invalid or expired")
+				return
+			}
+			auth = consumed
 		}
 
 		counter := &traffic.CountingWriter{}
@@ -581,13 +675,12 @@ func (s *State) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v2/auth/2fa/status", s.handleV2Auth2FAStatus)
 
 	// 下载：prepare（CLI/API 直发授权）+ PoW 挑战/授权（替代极验浏览器验证）+ landing
+	// PoW 端点始终注册：管理后台热更新 pow_enabled 后无需重启即可生效。
 	mux.HandleFunc("/api/v2/downloads/prepare", s.handleV2DownloadPrepare)
 	mux.HandleFunc("/api/v2/downloads/landing", s.handleV2DownloadLanding)
-	if s.Config.PowEnabled {
-		mux.HandleFunc("/api/v2/downloads/challenge", s.handleV2DownloadChallenge)
-		mux.HandleFunc("/api/v2/downloads/authorize", s.handleV2DownloadAuthorize)
-		mux.HandleFunc("/api/v2/pow/config", s.handleV2PowConfig)
-	}
+	mux.HandleFunc("/api/v2/downloads/challenge", s.handleV2DownloadChallenge)
+	mux.HandleFunc("/api/v2/downloads/authorize", s.handleV2DownloadAuthorize)
+	mux.HandleFunc("/api/v2/pow/config", s.handleV2PowConfig)
 
 	// 认证 + 扫描（v2 admin 中间件，返回信封格式错误）
 	mux.Handle("/api/v2/auth/login", s.v2AdminSwitchMiddleware(http.HandlerFunc(s.handleV2Login)))
@@ -654,16 +747,20 @@ func removePathUnderBase(basePath string, targetPath string) error {
 		return fmt.Errorf("解析目标路径失败: %w", err)
 	}
 
-	rel, err := filepath.Rel(absBase, absTarget)
+	baseResolved, err := filepath.EvalSymlinks(absBase)
 	if err != nil {
-		return fmt.Errorf("校验目标路径失败: %w", err)
+		return fmt.Errorf("解析基础路径符号链接失败: %w", err)
+	}
+	targetResolved, err := filepath.EvalSymlinks(absTarget)
+	if err != nil {
+		return fmt.Errorf("解析目标路径符号链接失败: %w", err)
 	}
 
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	if !pathWithinBase(baseResolved, targetResolved) {
 		return errForbiddenPath
 	}
 
-	if err := os.RemoveAll(absTarget); err != nil {
+	if err := os.RemoveAll(targetResolved); err != nil {
 		return err
 	}
 
@@ -761,11 +858,12 @@ func (s *State) InitFromDisk() error {
 }
 
 func (s *State) FixAssetURLs() error {
-	if s.Config.DownloadUrlBase == "" {
+	cfg := s.Conf()
+	if cfg.DownloadUrlBase == "" {
 		return nil
 	}
 
-	baseURL := s.Config.DownloadUrlBase
+	baseURL := cfg.DownloadUrlBase
 	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
 		baseURL = "https://" + baseURL
 	}
@@ -821,7 +919,8 @@ func (s *State) FixAssetURLs() error {
 			}
 
 			if parsedAssetURL.Host != targetDomain {
-				newURL := fmt.Sprintf("%s://%s%s", targetScheme, targetDomain, parsedAssetURL.Path)
+				// 用 EscapedPath 保留合法转义（url.Path 会把 %xx 解码，可能生成含空格/# 的坏链接）
+				newURL := fmt.Sprintf("%s://%s%s", targetScheme, targetDomain, parsedAssetURL.EscapedPath())
 				assetMap["url"] = newURL
 				changed = true
 			}
@@ -979,7 +1078,15 @@ func pathWithinBase(basePath, targetPath string) bool {
 	if err != nil {
 		return false
 	}
-	rel, err := filepath.Rel(base, target)
+	baseResolved, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		baseResolved = base
+	}
+	targetResolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		targetResolved = target
+	}
+	rel, err := filepath.Rel(baseResolved, targetResolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return false
 	}
@@ -989,7 +1096,7 @@ func pathWithinBase(basePath, targetPath string) bool {
 // issueAuthz 签发一条 DB 授权并返回响应。明文 token 仅在响应中返回一次。
 // 调用方需提供 clientIP（用于额度/流量归因）、sourceKind（web|api）与 maxBytes（文件大小，用于流量上限）。
 func (s *State) issueAuthz(filePath, returnURL, source, flow, clientIP, sourceKind string, maxBytes int64) (downloadTokenResponse, error) {
-	token, _, err := s.authzMgr.Issue(download_authz.IssueRequest{
+	token, _, err := s.AUTHZ().Issue(download_authz.IssueRequest{
 		FilePath:   filePath,
 		ReturnURL:  returnURL,
 		Source:     source,
@@ -1011,7 +1118,12 @@ func (s *State) issueAuthz(filePath, returnURL, source, flow, clientIP, sourceKi
 }
 
 func buildDownloadURL(token, filePath string) string {
-	return fmt.Sprintf("/download/%s?token=%s", filePath, url.QueryEscape(token))
+	parts := strings.Split(filepath.ToSlash(filePath), "/")
+	escaped := make([]string, 0, len(parts))
+	for _, part := range parts {
+		escaped = append(escaped, url.PathEscape(part))
+	}
+	return fmt.Sprintf("/download/%s?token=%s", strings.Join(escaped, "/"), url.QueryEscape(token))
 }
 
 func isBrowserRequest(r *http.Request) bool {

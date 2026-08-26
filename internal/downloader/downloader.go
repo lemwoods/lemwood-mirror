@@ -371,5 +371,6 @@ func FormatDownloadURL(serverAddress string, serverPort int, publicIP string, la
 		host = fmt.Sprintf("%s:%d", host, serverPort)
 	}
 
-	return fmt.Sprintf("%s://%s/download/%s/%s/%s", scheme, host, launcher, version, assetName)
+	return fmt.Sprintf("%s://%s/download/%s/%s/%s", scheme, host,
+		url.PathEscape(launcher), url.PathEscape(version), url.PathEscape(assetName))
 }
