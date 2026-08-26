@@ -165,7 +165,7 @@ export function AdminLayout() {
 
   if (isMobile) {
     return (
-      <Layout style={{ minHeight: '100vh' }}>
+      <Layout className="vh-full">
         {headerBar}
         <Drawer
           placement="left"
@@ -193,7 +193,7 @@ export function AdminLayout() {
   }
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout className="vh-full">
       <Sider trigger={null} collapsible collapsed={collapsed} theme="light">
         {logoContent}
         {menuContent}

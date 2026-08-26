@@ -29,6 +29,19 @@ import (
 
 var Version = "dev"
 
+// resolveBinaryPath 返回当前可执行文件的真实绝对路径（解析符号链接）。
+// 自更新替换与重启都必须基于该路径，避免相对路径/symlink 启动时写错或 exec 错目标。
+func resolveBinaryPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return os.Args[0]
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		return resolved
+	}
+	return exe
+}
+
 type LauncherState struct {
 	Name     string
 	Version  string
@@ -258,7 +271,7 @@ func main() {
 	}
 
 	ghc := gh.NewClient(cfg.GitHubToken, cfg.ProxyURL)
-	selfUpdateManager := selfupdate.NewManager(ghc, Version, os.Args[0], buildSelfUpdateConfig(cfg))
+	selfUpdateManager := selfupdate.NewManager(ghc, Version, resolveBinaryPath(), buildSelfUpdateConfig(cfg))
 	s.SetSelfUpdateManager(selfUpdateManager)
 
 	scanner := NewScanner(cfg, base, s, ghc)
@@ -330,7 +343,7 @@ func main() {
 	}
 
 	doRestart := func() error {
-		bin := os.Args[0]
+		bin := resolveBinaryPath()
 		if bin == "" {
 			bin = selfUpdateManager.BinaryPath()
 		}

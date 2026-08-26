@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { getStoredItem, setStoredItem, removeStoredItem } from '@/lib/storage'
 
 interface AuthState {
   token: string | null
@@ -8,18 +9,18 @@ interface AuthState {
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
-  token: localStorage.getItem('admin_token'),
-  isAuthenticated: !!localStorage.getItem('admin_token'),
+  token: getStoredItem('admin_token'),
+  isAuthenticated: !!getStoredItem('admin_token'),
   setToken: (token) => {
     if (token) {
-      localStorage.setItem('admin_token', token)
+      setStoredItem('admin_token', token)
     } else {
-      localStorage.removeItem('admin_token')
+      removeStoredItem('admin_token')
     }
     set({ token, isAuthenticated: !!token })
   },
   logout: () => {
-    localStorage.removeItem('admin_token')
+    removeStoredItem('admin_token')
     set({ token: null, isAuthenticated: false })
   },
 }))

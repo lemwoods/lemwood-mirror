@@ -42,3 +42,15 @@ body {
     padding-bottom: 4px;
   }
 }
+
+/* 动态视口高度适配：移动浏览器地址栏伸缩时 100vh 会溢出可视区，
+   支持 dvh 的浏览器自动使用动态高度，老内核回退 100vh。 */
+.vh-full {
+  min-height: 100vh;
+}
+
+@supports (height: 100dvh) {
+  .vh-full {
+    min-height: 100dvh;
+  }
+}

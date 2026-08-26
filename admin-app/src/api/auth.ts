@@ -1,4 +1,5 @@
 import api from '@/lib/axios'
+import { removeStoredItem } from '@/lib/storage'
 import type { LoginRequest, LoginResponse, TOTPStatus } from '@/types'
 
 export async function login(data: LoginRequest): Promise<LoginResponse> {
@@ -12,5 +13,5 @@ export async function getTOTPStatus(): Promise<TOTPStatus> {
 }
 
 export async function logout(): Promise<void> {
-  localStorage.removeItem('admin_token')
+  removeStoredItem('admin_token')
 }

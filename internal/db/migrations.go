@@ -145,6 +145,7 @@ func migrateV1SchemaBaseline(d *sql.DB) error {
 	defer rows.Close()
 
 	hasSourceColumn := false
+	hasBanTypeColumn := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
@@ -157,20 +158,27 @@ func migrateV1SchemaBaseline(d *sql.DB) error {
 		if name == "source" {
 			hasSourceColumn = true
 		}
+		if name == "ban_type" {
+			hasBanTypeColumn = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("遍历 ip_blacklist 列信息失败: %w", err)
 	}
 
-	if hasSourceColumn {
+	// 每列独立检查：老库可能只有 source 而缺 ban_type，不能因 source 存在就跳过整个迁移。
+	alterQueries := make([]string, 0, 2)
+	if !hasSourceColumn {
+		alterQueries = append(alterQueries, "ALTER TABLE ip_blacklist ADD COLUMN source TEXT DEFAULT 'manual'")
+	}
+	if !hasBanTypeColumn {
+		alterQueries = append(alterQueries, "ALTER TABLE ip_blacklist ADD COLUMN ban_type TEXT DEFAULT 'manual'")
+	}
+	if len(alterQueries) == 0 {
 		return nil
 	}
 
-	log.Println("[数据库迁移] v1: 为 ip_blacklist 表添加 source 和 ban_type 列")
-	alterQueries := []string{
-		"ALTER TABLE ip_blacklist ADD COLUMN source TEXT DEFAULT 'manual'",
-		"ALTER TABLE ip_blacklist ADD COLUMN ban_type TEXT DEFAULT 'manual'",
-	}
+	log.Println("[数据库迁移] v1: 为 ip_blacklist 表补充缺失的 source/ban_type 列")
 	for _, q := range alterQueries {
 		if _, err := d.Exec(q); err != nil {
 			return fmt.Errorf("添加列失败: %w, query: %s", err, q)

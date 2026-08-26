@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { message } from 'antd'
+import { getStoredItem, removeStoredItem } from '@/lib/storage'
 
 const api = axios.create({
   baseURL: '/api/v2',
@@ -8,7 +9,7 @@ const api = axios.create({
 
 api.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('admin_token')
+    const token = getStoredItem('admin_token')
     if (token) {
       config.headers.Authorization = token
     }
@@ -33,7 +34,7 @@ api.interceptors.response.use(
       error.message = error.response.data.error.message
     }
     if (error.response?.status === 401) {
-      localStorage.removeItem('admin_token')
+      removeStoredItem('admin_token')
       window.location.href = '/admin/'
       message.error('会话已过期，请重新登录')
     }

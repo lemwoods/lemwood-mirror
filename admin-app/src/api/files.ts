@@ -1,4 +1,5 @@
 import api from '@/lib/axios'
+import { getStoredItem } from '@/lib/storage'
 import type { FileInfo } from '@/types'
 
 export async function getFiles(path: string): Promise<FileInfo[]> {
@@ -34,6 +35,6 @@ export async function uploadFile(path: string, file: File): Promise<void> {
 }
 
 export function getDownloadUrl(path: string): string {
-  const token = localStorage.getItem('admin_token')
+  const token = getStoredItem('admin_token')
   return `/api/v2/admin/files/download?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token || '')}`
 }
