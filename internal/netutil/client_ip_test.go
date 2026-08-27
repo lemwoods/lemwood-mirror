@@ -16,11 +16,23 @@ func TestExtractClientIP(t *testing.T) {
 		expected   string
 	}{
 		{
-			name:       "xff takes precedence",
+			name:       "xff rightmost non-trusted entry wins",
 			remoteAddr: "127.0.0.1:1234",
 			xff:        " 203.0.113.10 , 198.51.100.2 ",
 			xri:        "198.51.100.1",
-			expected:   "203.0.113.10",
+			expected:   "198.51.100.2",
+		},
+		{
+			name:       "forged leftmost entry is ignored",
+			remoteAddr: "10.0.0.9:1234",
+			xff:        "6.6.6.6, 203.0.113.99",
+			expected:   "203.0.113.99",
+		},
+		{
+			name:       "all-private chain falls back to remote addr",
+			remoteAddr: "192.168.1.5:4444",
+			xff:        "172.16.0.3, 192.168.1.9",
+			expected:   "192.168.1.5",
 		},
 		{
 			name:       "xri used when xff empty",

@@ -19,6 +19,7 @@ import (
 	"lemwood_mirror/internal/traffic"
 	"lemwood_mirror/internal/version"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -336,6 +337,7 @@ func (s *State) processLogin(r *http.Request) loginOutcome {
 
 	// 检查锁定状态
 	s.loginAttemptsMu.Lock()
+	s.sweepLoginStateLocked(time.Now())
 	if unlockTime, locked := s.loginLocks[ip]; locked {
 		if time.Now().Before(unlockTime) {
 			s.loginAttemptsMu.Unlock()
@@ -447,6 +449,8 @@ func (s *State) handleV2Login(w http.ResponseWriter, r *http.Request) {
 		writeV2Error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method Not Allowed", nil)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	outcome := s.processLogin(r)
 	if outcome.Token != "" {
 		writeV2Success(w, r, map[string]string{"token": outcome.Token}, false)
@@ -467,6 +471,7 @@ func (s *State) handleV2DownloadPrepare(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req downloadPrepareRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeV2Error(w, r, http.StatusBadRequest, "bad_request", "Bad Request", nil)
@@ -588,7 +593,8 @@ func (s *State) handleV2DownloadAuthorize(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.powMgr.VerifyAndConsume(payload, filePath); err != nil {
+	clientIP := netutil.ExtractClientIP(r)
+	if err := s.powMgr.VerifyAndConsume(payload, filePath, clientIP); err != nil {
 		log.Printf("[PoW] 授权失败: nonce=%s file=%s challenges=%d err=%v",
 			payload.Challenge.Parameters.Nonce, filePath, s.powMgr.ChallengeCount(), err)
 		switch {
@@ -596,12 +602,16 @@ func (s *State) handleV2DownloadAuthorize(w http.ResponseWriter, r *http.Request
 			writeV2Error(w, r, http.StatusUnauthorized, "challenge_required", "Challenge not found, expired or already consumed", nil)
 		case errors.Is(err, pow.ErrChallengeConsumed):
 			writeV2Error(w, r, http.StatusConflict, "challenge_in_progress", "Challenge is already being used", nil)
-		case errors.Is(err, pow.ErrSignatureInvalid):
+		case errors.Is(err, pow.ErrSignatureInvalid), errors.Is(err, pow.ErrClientIPMismatch):
 			writeV2Error(w, r, http.StatusForbidden, "challenge_failed", "Challenge signature invalid", nil)
 		case errors.Is(err, pow.ErrFileBindingMismatch):
 			writeV2Error(w, r, http.StatusForbidden, "challenge_failed", "Challenge file binding mismatch", nil)
 		case errors.Is(err, pow.ErrSolutionInvalid):
 			writeV2Error(w, r, http.StatusForbidden, "challenge_failed", "PoW solution invalid", nil)
+		case errors.Is(err, pow.ErrVerificationBusy):
+			// 瞬时并发过载：让客户端稍后重试，而不是当成服务端故障
+			w.Header().Set("Retry-After", "2")
+			writeV2Error(w, r, http.StatusServiceUnavailable, "pow_busy", "Verification is busy, please retry shortly", nil)
 		default:
 			log.Printf("[PoW] 授权失败: %v", err)
 			writeV2Error(w, r, http.StatusInternalServerError, "internal_error", "Authorization failed", nil)
@@ -616,7 +626,7 @@ func (s *State) handleV2DownloadAuthorize(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	clientIP := netutil.ExtractClientIP(r)
+	clientIP = netutil.ExtractClientIP(r)
 	resp, err := s.issueAuthz(filePath, "", "pow", "authorize", clientIP, "web", info.Size())
 	if err != nil {
 		writeV2Error(w, r, http.StatusInternalServerError, "token_generation_failed", "Failed to generate download token", nil)
@@ -754,7 +764,9 @@ func (s *State) handleV2AdminConfig(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
-		var newCfg config.Config
+		// 以当前运行配置为基底解码：管理端漏传的字段保持现值，
+		// 避免空 JSON 结构体把未提交字段静默清零。
+		newCfg := *s.Config
 		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
 			writeV2Error(w, r, http.StatusBadRequest, "bad_request", "Bad Request", nil)
 			return
@@ -816,6 +828,7 @@ func (s *State) handleV2AdminBlacklist(w http.ResponseWriter, r *http.Request) {
 		}
 		writeV2Success(w, r, list, false)
 	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var req struct {
 			IP     string `json:"ip"`
 			Reason string `json:"reason"`
@@ -852,16 +865,13 @@ func (s *State) handleV2AdminFiles(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		path := r.URL.Query().Get("path")
-		fullPath := filepath.Join(s.BasePath, path)
-
-		absBase, _ := filepath.Abs(s.BasePath)
-		absPath, _ := filepath.Abs(fullPath)
-		if !strings.HasPrefix(absPath, absBase) {
+		cleanPath, okPath := safeJoinUnderBase(s.BasePath, path)
+		if !okPath {
 			writeV2Error(w, r, http.StatusForbidden, "forbidden", "Forbidden", nil)
 			return
 		}
 
-		entries, err := os.ReadDir(fullPath)
+		entries, err := os.ReadDir(cleanPath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				writeV2Error(w, r, http.StatusNotFound, "not_found", "Directory not found", nil)
@@ -910,11 +920,8 @@ func (s *State) handleV2AdminFiles(w http.ResponseWriter, r *http.Request) {
 			writeV2Error(w, r, http.StatusBadRequest, "missing_param", "Missing path", nil)
 			return
 		}
-		fullPath := filepath.Join(s.BasePath, path)
-
-		absBase, _ := filepath.Abs(s.BasePath)
-		absPath, _ := filepath.Abs(fullPath)
-		if !strings.HasPrefix(absPath, absBase) {
+		fullPath, okPath := safeJoinUnderBase(s.BasePath, path)
+		if !okPath {
 			writeV2Error(w, r, http.StatusForbidden, "forbidden", "Forbidden", nil)
 			return
 		}
@@ -962,11 +969,8 @@ func (s *State) handleV2AdminFileDownload(w http.ResponseWriter, r *http.Request
 		writeV2Error(w, r, http.StatusBadRequest, "missing_param", "Missing path", nil)
 		return
 	}
-	fullPath := filepath.Join(s.BasePath, path)
-
-	absBase, _ := filepath.Abs(s.BasePath)
-	absPath, _ := filepath.Abs(fullPath)
-	if !strings.HasPrefix(absPath, absBase) {
+	fullPath, okPath := safeJoinUnderBase(s.BasePath, path)
+	if !okPath {
 		writeV2Error(w, r, http.StatusForbidden, "forbidden", "Forbidden", nil)
 		return
 	}
@@ -977,9 +981,22 @@ func (s *State) handleV2AdminFileDownload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(fullPath)))
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(fullPath)})
+	if disposition != "" {
+		w.Header().Set("Content-Disposition", disposition)
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeFile(w, r, fullPath)
+}
+
+// safeJoinUnderBase 把用户提供的相对路径拼接到 base 下并用 Rel 语义校验，
+// 防止弱前缀匹配（HasPrefix）导致的兄弟目录逃逸。
+func safeJoinUnderBase(base, sub string) (string, bool) {
+	clean := filepath.Clean(filepath.Join(base, sub))
+	if !pathWithinBase(base, clean) {
+		return "", false
+	}
+	return clean, true
 }
 
 // handleV2AdminSelfUpdateStatus 自更新状态（信封包裹）。

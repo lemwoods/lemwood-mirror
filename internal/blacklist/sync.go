@@ -54,8 +54,17 @@ func SyncExternalBlacklist(url string) error {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if strings.Contains(line, ":") {
-			line = strings.Split(line, ":")[0]
+		// 剥离行内注释（# 之后的内容）
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = strings.TrimSpace(line[:idx])
+		}
+		if line == "" {
+			continue
+		}
+		// 仅当形如 ipv4:port 或 ip:注释（单个冒号）时切掉冒号后内容；
+		// IPv6 地址含多个冒号，原样保留，避免被截断成垃圾条目。
+		if strings.Count(line, ":") == 1 {
+			line = strings.TrimSpace(strings.SplitN(line, ":", 2)[0])
 		}
 		if line != "" {
 			ips = append(ips, line)

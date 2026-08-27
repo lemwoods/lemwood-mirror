@@ -48,7 +48,7 @@ func TestCreateAndVerifyRoundTrip(t *testing.T) {
 		t.Fatal("solve failed to find a counter")
 	}
 
-	if err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk"); err != nil {
+	if err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk", "1.2.3.4"); err != nil {
 		t.Fatalf("VerifyAndConsume error = %v", err)
 	}
 }
@@ -60,7 +60,7 @@ func TestVerifyRejectsWrongSolution(t *testing.T) {
 	ch, _ := m.CreateChallenge("fcl/1.0.0/a.apk", "1.2.3.4", "web")
 
 	// 故意提交一个错误 counter（几乎不可能满足）
-	err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: Solution{Counter: 0, DerivedKey: ""}}, "fcl/1.0.0/a.apk")
+	err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: Solution{Counter: 0, DerivedKey: ""}}, "fcl/1.0.0/a.apk", "1.2.3.4")
 	if err != ErrSolutionInvalid {
 		t.Fatalf("expected ErrSolutionInvalid, got %v", err)
 	}
@@ -70,7 +70,7 @@ func TestVerifyRejectsWrongSolution(t *testing.T) {
 	if !ok {
 		t.Fatal("solve failed")
 	}
-	if err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk"); err != nil {
+	if err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk", "1.2.3.4"); err != nil {
 		t.Fatalf("retry after wrong answer error = %v", err)
 	}
 }
@@ -84,11 +84,11 @@ func TestVerifyRejectsReplay(t *testing.T) {
 	if !ok {
 		t.Fatal("solve failed")
 	}
-	if err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk"); err != nil {
+	if err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk", "1.2.3.4"); err != nil {
 		t.Fatalf("first verify error = %v", err)
 	}
 	// 同一挑战重放应被拒
-	if err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk"); err != ErrChallengeConsumed {
+	if err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk", "1.2.3.4"); err != ErrChallengeConsumed {
 		t.Fatalf("expected ErrChallengeConsumed on replay, got %v", err)
 	}
 }
@@ -101,7 +101,7 @@ func TestVerifyRejectsTamperedSignature(t *testing.T) {
 	// 篡改 difficulty 但不改签名
 	tampered := ch
 	tampered.Parameters.Difficulty = 1
-	err := m.VerifyAndConsume(Payload{Challenge: tampered, Solution: Solution{Counter: 0}}, "fcl/1.0.0/a.apk")
+	err := m.VerifyAndConsume(Payload{Challenge: tampered, Solution: Solution{Counter: 0}}, "fcl/1.0.0/a.apk", "1.2.3.4")
 	if err != ErrSignatureInvalid {
 		t.Fatalf("expected ErrSignatureInvalid, got %v", err)
 	}
@@ -113,7 +113,7 @@ func TestVerifyRejectsFileBindingMismatch(t *testing.T) {
 
 	ch, _ := m.CreateChallenge("fcl/1.0.0/a.apk", "1.2.3.4", "web")
 	sol, _ := solve(ch.Parameters)
-	err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "hmcl/3.0/b.jar")
+	err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "hmcl/3.0/b.jar", "1.2.3.4")
 	if err != ErrFileBindingMismatch {
 		t.Fatalf("expected ErrFileBindingMismatch, got %v", err)
 	}
@@ -126,7 +126,7 @@ func TestVerifyRejectsExpired(t *testing.T) {
 	ch, _ := m.CreateChallenge("fcl/1.0.0/a.apk", "1.2.3.4", "web")
 	time.Sleep(200 * time.Millisecond)
 	sol, _ := solve(ch.Parameters)
-	err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk")
+	err := m.VerifyAndConsume(Payload{Challenge: ch, Solution: sol}, "fcl/1.0.0/a.apk", "1.2.3.4")
 	if err != ErrChallengeExpired {
 		t.Fatalf("expected ErrChallengeExpired, got %v", err)
 	}

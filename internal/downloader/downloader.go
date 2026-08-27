@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -104,25 +105,6 @@ func (d *Downloader) DownloadLatest(ctx context.Context, launcher string, destBa
 	}
 
 	indexPath := filepath.Join(dir, "index.json")
-	b, err := json.MarshalIndent(info, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("序列化 index.json 失败: %w", err)
-	}
-
-	// 检查 index.json 是否已存在且内容一致
-	writeIndex := true
-	if existingContent, err := os.ReadFile(indexPath); err == nil {
-		if string(existingContent) == string(b) {
-			writeIndex = false
-		}
-	}
-
-	if writeIndex {
-		if err := os.WriteFile(indexPath, b, 0o644); err != nil {
-			return "", fmt.Errorf("写入 index.json 失败: %w", err)
-		}
-		log.Printf("已将版本信息写入 %s", indexPath)
-	}
 
 	client := d.httpClient
 	if proxyURL != "" {
@@ -168,6 +150,28 @@ func (d *Downloader) DownloadLatest(ctx context.Context, launcher string, destBa
 		}
 	}
 
+	// 所有资产下载完成后再写 index.json 并生效，
+	// 避免客户端瞬间拿到引用尚未存在资产的索引。
+	b, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("序列化 index.json 失败: %w", err)
+	}
+
+	// 检查 index.json 是否已存在且内容一致
+	writeIndex := true
+	if existingContent, err := os.ReadFile(indexPath); err == nil {
+		if string(existingContent) == string(b) {
+			writeIndex = false
+		}
+	}
+
+	if writeIndex {
+		if err := os.WriteFile(indexPath, b, 0o644); err != nil {
+			return "", fmt.Errorf("写入 index.json 失败: %w", err)
+		}
+		log.Printf("已将版本信息写入 %s", indexPath)
+	}
+
 	return indexPath, nil
 }
 
@@ -193,7 +197,7 @@ func getPublicIP() (string, error) {
 		return publicIP, nil
 	}
 
-	resp, err := http.Get("http://ifconfig.me/ip")
+	resp, err := http.Get("https://ifconfig.me/ip")
 	if err != nil {
 		return "", err
 	}
@@ -313,7 +317,8 @@ func (d *Downloader) downloadAsset(ctx context.Context, client *http.Client, ass
 	}
 
 	if written != resp.ContentLength && resp.ContentLength > 0 {
-		log.Printf("警告: 下载 %s 字节数不匹配 (期望: %d, 实际: %d)", name, resp.ContentLength, written)
+		os.Remove(partial)
+		return fmt.Errorf("下载 %s 字节数不匹配 (期望: %d, 实际: %d)，已丢弃不完整文件", name, resp.ContentLength, written)
 	}
 
 	if err := os.Rename(partial, outfile); err != nil {
@@ -334,6 +339,13 @@ type progressWriter struct {
 func (pw *progressWriter) Write(p []byte) (int, error) {
 	n := len(p)
 	pw.written += int64(n)
+	if pw.total <= 0 {
+		if time.Since(pw.lastUpdate) > 2*time.Second {
+			pw.lastUpdate = time.Now()
+			log.Printf("下载 %s: 已写入 %d 字节", pw.fileName, pw.written)
+		}
+		return n, nil
+	}
 	if time.Since(pw.lastUpdate) > 2*time.Second {
 		pw.lastUpdate = time.Now()
 		percentage := float64(pw.written) / float64(pw.total) * 100
@@ -342,19 +354,13 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// FormatDownloadURL 构造对外展示的资产下载地址。
 func FormatDownloadURL(serverAddress string, serverPort int, publicIP string, launcher, version, assetName string) string {
 	var host string
 	var scheme string = "http"
 
 	if serverAddress != "" {
 		host = serverAddress
-		// 如果 serverAddress 已经有协议头，使用它并在需要时剥离它用于主机处理，
-		// 但通常配置中的 serverAddress 只是域名或域名:端口。
-		// 假设 serverAddress 只是用户请求中的地址部分。
-		// 如果 serverAddress 包含 http/https，我们需要解析它或直接使用它。
-		// 然而，要求说"下载地址格式必须为地址：端口"。
-
-		// 简单启发式：如果 serverAddress 以 http:// 或 https:// 开头，则使用该协议。
 		if strings.HasPrefix(serverAddress, "http://") {
 			scheme = "http"
 			host = strings.TrimPrefix(serverAddress, "http://")
@@ -362,6 +368,12 @@ func FormatDownloadURL(serverAddress string, serverPort int, publicIP string, la
 			scheme = "https"
 			host = strings.TrimPrefix(serverAddress, "https://")
 		}
+		// server_address 配置成 "example.com:8080" 时先剥掉端口，
+		// 避免下方再拼一次端口产生 example.com:8080:8080。
+		if h, _, err := net.SplitHostPort(strings.TrimSuffix(host, "/")); err == nil {
+			host = h
+		}
+		host = strings.TrimSuffix(host, "/")
 	} else {
 		host = publicIP
 	}

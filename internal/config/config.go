@@ -450,13 +450,26 @@ func (c *Config) renderYAML() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// atomicWriteFile 先写临时文件再 rename 覆盖，避免进程中断留下截断的半截文件。
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func (c *Config) Save(projectRoot string) error {
 	cfgPath := configYAMLPath(projectRoot)
 	data, err := c.renderYAML()
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+	if err := atomicWriteFile(cfgPath, data, 0o644); err != nil {
 		return fmt.Errorf("写入 config.yaml 失败: %w", err)
 	}
 	return nil

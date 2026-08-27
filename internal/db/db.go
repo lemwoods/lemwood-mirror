@@ -163,7 +163,9 @@ func InitDB(storagePath string, cfg *config.Config) error {
 	if err := createTables(); err != nil {
 		return err
 	}
-	if mode == "pgsql" {
+	// 统一使用 usePostgres 判定：database_mode=auto 且配置了 PG 的部署
+	// 与显式 pgsql 行为一致（仅当来源 MySQL 等清洗源未配置时为 no-op）。
+	if usePostgres {
 		if err := migratePostgresFromConfiguredSources(storagePath, cfg); err != nil {
 			return fmt.Errorf("pgsql 数据迁移失败: %w", err)
 		}
@@ -313,13 +315,13 @@ func createTables() error {
 		if _, err := DB.Exec(`INSERT INTO system_info ("key", value) VALUES ($1, $2) ON CONFLICT ("key") DO NOTHING`, "start_time", startTime); err != nil {
 			return fmt.Errorf("记录系统启动时间失败: %w", err)
 		}
-		// schema_version 由下方统一的 runMigrations 逐版本写入。
-		return nil
-	}
-	var queries []string
-	if isMySQL {
-		queries = []string{
-			`CREATE TABLE IF NOT EXISTS visits (
+		// 不提前 return：与 SQLite/MySQL 一样走下方统一的 runMigrations，
+		// 保证 aggregate_key 唯一索引等版本化迁移在 PostgreSQL 上同样生效。
+	} else {
+		var queries []string
+		if isMySQL {
+			queries = []string{
+				`CREATE TABLE IF NOT EXISTS visits (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 ip VARCHAR(255),
                 path TEXT,
@@ -332,7 +334,7 @@ func createTables() error {
                 aggregate_key VARCHAR(64),
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE TABLE IF NOT EXISTS downloads (
+				`CREATE TABLE IF NOT EXISTS downloads (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 file_name VARCHAR(255),
                 launcher VARCHAR(255),
@@ -341,29 +343,29 @@ func createTables() error {
                 country VARCHAR(255),
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE TABLE IF NOT EXISTS ip_blacklist (
+				`CREATE TABLE IF NOT EXISTS ip_blacklist (
                 ip VARCHAR(255) PRIMARY KEY,
                 reason TEXT,
                 source VARCHAR(50) DEFAULT 'manual',
                 ban_type VARCHAR(50) DEFAULT 'manual',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE TABLE IF NOT EXISTS ip_daily_traffic (
+				`CREATE TABLE IF NOT EXISTS ip_daily_traffic (
                 ip VARCHAR(255),
                 date VARCHAR(20),
                 bytes_downloaded BIGINT DEFAULT 0,
                 PRIMARY KEY (ip, date)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE INDEX idx_ip_daily_traffic_date ON ip_daily_traffic(date)`,
-			`CREATE TABLE IF NOT EXISTS daily_traffic (
+				`CREATE INDEX idx_ip_daily_traffic_date ON ip_daily_traffic(date)`,
+				`CREATE TABLE IF NOT EXISTS daily_traffic (
                 date VARCHAR(20) PRIMARY KEY,
                 bytes_downloaded BIGINT DEFAULT 0
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE TABLE IF NOT EXISTS daily_completed_traffic (
+				`CREATE TABLE IF NOT EXISTS daily_completed_traffic (
                 date VARCHAR(20) PRIMARY KEY,
                 bytes_downloaded BIGINT DEFAULT 0
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE TABLE IF NOT EXISTS download_authorizations (
+				`CREATE TABLE IF NOT EXISTS download_authorizations (
                 authorization_id VARCHAR(64) PRIMARY KEY,
                 token_hash VARCHAR(64) NOT NULL,
                 file_path TEXT NOT NULL,
@@ -382,7 +384,7 @@ func createTables() error {
                 consumed_at DATETIME,
                 UNIQUE KEY uq_dlauthz_token_hash (token_hash)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE TABLE IF NOT EXISTS download_events (
+				`CREATE TABLE IF NOT EXISTS download_events (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 authorization_id VARCHAR(64),
                 file_path TEXT,
@@ -402,29 +404,29 @@ func createTables() error {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE KEY uq_dlevents_source_id (source, source_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE TABLE IF NOT EXISTS system_info (
+				`CREATE TABLE IF NOT EXISTS system_info (
                 ` + "`key`" + ` VARCHAR(255) PRIMARY KEY,
                 value TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE TABLE IF NOT EXISTS stats_snapshot (
+				`CREATE TABLE IF NOT EXISTS stats_snapshot (
                 id INT PRIMARY KEY,
                 data LONGTEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-			`CREATE INDEX idx_visits_created_at ON visits(created_at)`,
-			`CREATE INDEX idx_visits_country ON visits(country)`,
-			`CREATE INDEX idx_downloads_created_at ON downloads(created_at)`,
-			`CREATE INDEX idx_downloads_file_name ON downloads(file_name)`,
-			`CREATE INDEX idx_downloads_launcher_version ON downloads(launcher, version)`,
-			`CREATE INDEX idx_dlauthz_status_expires ON download_authorizations(status, expires_at)`,
-			`CREATE INDEX idx_dlevents_ip_date ON download_events(client_ip, date)`,
-			`CREATE INDEX idx_dlevents_date ON download_events(date)`,
-			`CREATE INDEX idx_dlevents_launcher ON download_events(launcher)`,
-		}
-	} else {
-		queries = []string{
-			`CREATE TABLE IF NOT EXISTS visits (
+				`CREATE INDEX idx_visits_created_at ON visits(created_at)`,
+				`CREATE INDEX idx_visits_country ON visits(country)`,
+				`CREATE INDEX idx_downloads_created_at ON downloads(created_at)`,
+				`CREATE INDEX idx_downloads_file_name ON downloads(file_name)`,
+				`CREATE INDEX idx_downloads_launcher_version ON downloads(launcher, version)`,
+				`CREATE INDEX idx_dlauthz_status_expires ON download_authorizations(status, expires_at)`,
+				`CREATE INDEX idx_dlevents_ip_date ON download_events(client_ip, date)`,
+				`CREATE INDEX idx_dlevents_date ON download_events(date)`,
+				`CREATE INDEX idx_dlevents_launcher ON download_events(launcher)`,
+			}
+		} else {
+			queries = []string{
+				`CREATE TABLE IF NOT EXISTS visits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ip TEXT,
                 path TEXT,
@@ -437,7 +439,7 @@ func createTables() error {
                 aggregate_key TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )`,
-			`CREATE TABLE IF NOT EXISTS downloads (
+				`CREATE TABLE IF NOT EXISTS downloads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_name TEXT,
                 launcher TEXT,
@@ -446,29 +448,29 @@ func createTables() error {
                 country TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )`,
-			`CREATE TABLE IF NOT EXISTS ip_blacklist (
+				`CREATE TABLE IF NOT EXISTS ip_blacklist (
                 ip TEXT PRIMARY KEY,
                 reason TEXT,
                 source TEXT DEFAULT 'manual',
                 ban_type TEXT DEFAULT 'manual',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )`,
-			`CREATE TABLE IF NOT EXISTS ip_daily_traffic (
+				`CREATE TABLE IF NOT EXISTS ip_daily_traffic (
                 ip TEXT,
                 date TEXT,
                 bytes_downloaded INTEGER DEFAULT 0,
                 PRIMARY KEY (ip, date)
             )`,
-			`CREATE INDEX IF NOT EXISTS idx_ip_daily_traffic_date ON ip_daily_traffic(date)`,
-			`CREATE TABLE IF NOT EXISTS daily_traffic (
+				`CREATE INDEX IF NOT EXISTS idx_ip_daily_traffic_date ON ip_daily_traffic(date)`,
+				`CREATE TABLE IF NOT EXISTS daily_traffic (
                 date TEXT PRIMARY KEY,
                 bytes_downloaded INTEGER DEFAULT 0
             )`,
-			`CREATE TABLE IF NOT EXISTS daily_completed_traffic (
+				`CREATE TABLE IF NOT EXISTS daily_completed_traffic (
                 date TEXT PRIMARY KEY,
                 bytes_downloaded INTEGER DEFAULT 0
             )`,
-			`CREATE TABLE IF NOT EXISTS download_authorizations (
+				`CREATE TABLE IF NOT EXISTS download_authorizations (
                 authorization_id TEXT PRIMARY KEY,
                 token_hash TEXT NOT NULL UNIQUE,
                 file_path TEXT NOT NULL,
@@ -486,7 +488,7 @@ func createTables() error {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 consumed_at DATETIME
             )`,
-			`CREATE TABLE IF NOT EXISTS download_events (
+				`CREATE TABLE IF NOT EXISTS download_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 authorization_id TEXT,
                 file_path TEXT,
@@ -506,54 +508,55 @@ func createTables() error {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(source, source_id)
             )`,
-			`CREATE TABLE IF NOT EXISTS system_info (
+				`CREATE TABLE IF NOT EXISTS system_info (
                 key TEXT PRIMARY KEY,
                 value TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )`,
-			`CREATE TABLE IF NOT EXISTS stats_snapshot (
+				`CREATE TABLE IF NOT EXISTS stats_snapshot (
                 id INTEGER PRIMARY KEY,
                 data TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )`,
-			`CREATE INDEX IF NOT EXISTS idx_visits_created_at ON visits(created_at)`,
-			`CREATE INDEX IF NOT EXISTS idx_visits_country ON visits(country)`,
-			`CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON downloads(created_at)`,
-			`CREATE INDEX IF NOT EXISTS idx_downloads_file_name ON downloads(file_name)`,
-			`CREATE INDEX IF NOT EXISTS idx_downloads_launcher_version ON downloads(launcher, version)`,
-			`CREATE INDEX IF NOT EXISTS idx_dlauthz_status_expires ON download_authorizations(status, expires_at)`,
-			`CREATE INDEX IF NOT EXISTS idx_dlevents_ip_date ON download_events(client_ip, date)`,
-			`CREATE INDEX IF NOT EXISTS idx_dlevents_date ON download_events(date)`,
-			`CREATE INDEX IF NOT EXISTS idx_dlevents_launcher ON download_events(launcher)`,
-		}
-	}
-
-	for _, query := range queries {
-		if _, err := DB.Exec(query); err != nil {
-			// MySQL 中创建索引如果已存在会报错，而 SQLite 有 IF NOT EXISTS。
-			// 这里仅忽略“索引已存在”相关的错误 (Error 1061: Duplicate key name)。
-			if isMySQL && strings.Contains(strings.ToUpper(query), "CREATE INDEX") {
-				errMsg := err.Error()
-				if strings.Contains(errMsg, "Duplicate key") || strings.Contains(errMsg, "already exists") || strings.Contains(errMsg, "1061") {
-					continue
-				}
+				`CREATE INDEX IF NOT EXISTS idx_visits_created_at ON visits(created_at)`,
+				`CREATE INDEX IF NOT EXISTS idx_visits_country ON visits(country)`,
+				`CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON downloads(created_at)`,
+				`CREATE INDEX IF NOT EXISTS idx_downloads_file_name ON downloads(file_name)`,
+				`CREATE INDEX IF NOT EXISTS idx_downloads_launcher_version ON downloads(launcher, version)`,
+				`CREATE INDEX IF NOT EXISTS idx_dlauthz_status_expires ON download_authorizations(status, expires_at)`,
+				`CREATE INDEX IF NOT EXISTS idx_dlevents_ip_date ON download_events(client_ip, date)`,
+				`CREATE INDEX IF NOT EXISTS idx_dlevents_date ON download_events(date)`,
+				`CREATE INDEX IF NOT EXISTS idx_dlevents_launcher ON download_events(launcher)`,
 			}
-			return fmt.Errorf("创建表/索引失败: %w, query: %s", err, query)
 		}
-	}
 
-	// 记录系统首次启动时间。
-	// 用 Go 侧 UTC 时间而不是数据库函数（MySQL NOW() 为服务器本地时区、
-	// SQLite datetime('now') 为 UTC），保证写入格式/时区与 stats 模块读取解析
-	// （按 UTC 解析 "2006-01-02 15:04:05"）始终一致，避免运行天数计算偏差。
-	startTime := time.Now().UTC().Format("2006-01-02 15:04:05")
-	if isMySQL {
-		if _, err := DB.Exec("INSERT IGNORE INTO system_info (`key`, value) VALUES (?, ?)", "start_time", startTime); err != nil {
-			return fmt.Errorf("记录系统启动时间失败: %w", err)
+		for _, query := range queries {
+			if _, err := DB.Exec(query); err != nil {
+				// MySQL 中创建索引如果已存在会报错，而 SQLite 有 IF NOT EXISTS。
+				// 这里仅忽略“索引已存在”相关的错误 (Error 1061: Duplicate key name)。
+				if isMySQL && strings.Contains(strings.ToUpper(query), "CREATE INDEX") {
+					errMsg := err.Error()
+					if strings.Contains(errMsg, "Duplicate key") || strings.Contains(errMsg, "already exists") || strings.Contains(errMsg, "1061") {
+						continue
+					}
+				}
+				return fmt.Errorf("创建表/索引失败: %w, query: %s", err, query)
+			}
 		}
-	} else {
-		if _, err := DB.Exec("INSERT OR IGNORE INTO system_info (key, value) VALUES (?, ?)", "start_time", startTime); err != nil {
-			return fmt.Errorf("记录系统启动时间失败: %w", err)
+
+		// 记录系统首次启动时间。
+		// 用 Go 侧 UTC 时间而不是数据库函数（MySQL NOW() 为服务器本地时区、
+		// SQLite datetime('now') 为 UTC），保证写入格式/时区与 stats 模块读取解析
+		// （按 UTC 解析 "2006-01-02 15:04:05"）始终一致，避免运行天数计算偏差。
+		startTime := time.Now().UTC().Format("2006-01-02 15:04:05")
+		if isMySQL {
+			if _, err := DB.Exec("INSERT IGNORE INTO system_info (`key`, value) VALUES (?, ?)", "start_time", startTime); err != nil {
+				return fmt.Errorf("记录系统启动时间失败: %w", err)
+			}
+		} else {
+			if _, err := DB.Exec("INSERT OR IGNORE INTO system_info (key, value) VALUES (?, ?)", "start_time", startTime); err != nil {
+				return fmt.Errorf("记录系统启动时间失败: %w", err)
+			}
 		}
 	}
 
@@ -701,6 +704,11 @@ func AddIPToBlacklistWithSource(ip, reason, source, banType string) error {
 	return err
 }
 
+// RecordTraffic 记录一次下载流量到带 IP 明细表（served 口径）。
+//
+// Deprecated: 流量统计双口径迁移后，生产路径不再写入 ip_daily_traffic /
+// daily_traffic（冻结为只读历史基线），实际字节由 download_events 状态表承载
+// （db.RecordDownloadEvent）。仅测试引用，勿在请求路径调用。
 func RecordTraffic(ip string, bytes int64) error {
 	date := time.Now().Format("2006-01-02")
 	var query string
@@ -735,6 +743,9 @@ func RecordTraffic(ip string, bytes int64) error {
 // RecordCompletedTraffic 记录一次完整传输的流量到无 IP 聚合表
 // daily_completed_traffic（展示口径，无 IP 维度）。
 // 与 RecordTraffic 的 served 口径（含客户端中止的部分传输，用于防刷墙）相互独立。
+// RecordCompletedTraffic 记录一次完整传输的流量到无 IP 聚合表。
+//
+// Deprecated: 同 RecordTraffic，日常数据由 download_events 承载；仅测试引用。
 func RecordCompletedTraffic(bytes int64) error {
 	date := time.Now().Format("2006-01-02")
 	return updateDailyTrafficAggregate("daily_completed_traffic", date, bytes)
@@ -794,7 +805,7 @@ func GetTotalTraffic() (int64, error) {
 
 // GetDailyTrafficStats 返回最近 N 天每日普通下载流量，从无 IP 聚合表查询
 func GetDailyTrafficStats(days int) ([]DailyTrafficStat, error) {
-	threshold := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+	threshold := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	rows, err := DB.Query(rebind("SELECT date, COALESCE(bytes_downloaded, 0) FROM daily_traffic WHERE date >= ? ORDER BY date"), threshold)
 	if err != nil {
 		return nil, err
@@ -820,7 +831,7 @@ func GetTotalCompletedTraffic() (int64, error) {
 
 // GetDailyCompletedTrafficStats 返回最近 N 天每日完整传输流量，从 daily_completed_traffic 聚合表查询
 func GetDailyCompletedTrafficStats(days int) ([]DailyTrafficStat, error) {
-	threshold := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+	threshold := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	rows, err := DB.Query(rebind("SELECT date, COALESCE(bytes_downloaded, 0) FROM daily_completed_traffic WHERE date >= ? ORDER BY date"), threshold)
 	if err != nil {
 		return nil, err

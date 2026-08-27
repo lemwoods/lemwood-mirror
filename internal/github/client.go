@@ -3,6 +3,7 @@ package gh
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -189,6 +190,34 @@ func (c *Client) ListTags(ctx context.Context, owner, repo string, limit int) ([
 
 func (c *Client) GetReleaseByTag(ctx context.Context, owner, repo, tag string) (*github.RepositoryRelease, *github.Response, error) {
 	return c.client().Repositories.GetReleaseByTag(ctx, owner, repo, tag)
+}
+
+// GetReleaseAssetDigests 返回指定 release 全部资产的 SHA-256 摘要（形如 name → hex64）。
+// 注：go-github v50 的 ReleaseAsset 结构尚无 Digest 字段，这里用本地结构体直接解析。
+// 旧版 Release 可能未提供 digest，此时对应资产不会出现在返回值中。
+func (c *Client) GetReleaseAssetDigests(ctx context.Context, owner, repo, tag string) (map[string]string, error) {
+	req, err := c.client().NewRequest(http.MethodGet,
+		fmt.Sprintf("repos/%s/%s/releases/tags/%s", owner, repo, url.PathEscape(tag)), nil)
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		Assets []struct {
+			Name   string `json:"name"`
+			Digest string `json:"digest,omitempty"`
+		} `json:"assets"`
+	}
+	if _, err := c.client().Do(ctx, req, &body); err != nil {
+		return nil, err
+	}
+	digests := make(map[string]string)
+	for _, a := range body.Assets {
+		hex := strings.TrimPrefix(a.Digest, "sha256:")
+		if a.Name != "" && len(hex) == 64 {
+			digests[a.Name] = hex
+		}
+	}
+	return digests, nil
 }
 
 // BackoffIfRateLimited 检查响应是否受到速率限制，并在需要时休眠。

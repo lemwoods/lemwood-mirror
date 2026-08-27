@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"log"
+	"net"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -19,6 +21,9 @@ type LauncherScanResponse struct {
 // StartHTTPWithScan creates the HTTP server and registers handlers.
 // scanFunc, launcherScanFunc, and selfUpdateCheckFunc are stored on State
 // and registered inside Routes with AdminMiddleware protection.
+//
+// 监听在返回前同步完成：成功后立即交出 *http.Server 并在后台开始 Serve，
+// 保证调用方（信号处理）随时能对 srv 调用 Shutdown。
 func StartHTTPWithScan(addr string, s *State, scanFunc func(), launcherScanFunc func(launcherName string), selfUpdateCheckFunc func(), selfUpdateApplyFunc func(ctx context.Context) error, restartFunc func() error) (*http.Server, error) {
 	// Store callbacks on State so Routes can register them with auth middleware
 	s.scanAllFunc = scanFunc
@@ -43,5 +48,16 @@ func StartHTTPWithScan(addr string, s *State, scanFunc func(), launcherScanFunc 
 		IdleTimeout:  60 * time.Second,
 	}
 
-	return srv, srv.ListenAndServe()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Printf("http 服务异常退出: %v", serveErr)
+		}
+	}()
+
+	return srv, nil
 }

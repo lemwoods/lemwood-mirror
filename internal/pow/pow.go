@@ -53,6 +53,8 @@ var (
 	ErrSolutionInvalid     = errors.New("pow: solution invalid")
 	ErrSignatureInvalid    = errors.New("pow: challenge signature invalid")
 	ErrFileBindingMismatch = errors.New("pow: challenge file binding mismatch")
+	ErrClientIPMismatch    = errors.New("pow: challenge client ip mismatch")
+	ErrVerificationBusy    = errors.New("pow: verification rate limit exceeded")
 )
 
 // Manager 管理内存中的 PoW 挑战。线程安全。
@@ -254,11 +256,12 @@ func (m *Manager) ChallengeCount() int {
 }
 
 // VerifyAndConsume 校验提交的解并消费挑战。成功返回 nil；失败返回具体错误哨兵。
-// filePath 必须与签发时一致（文件绑定）。
+// filePath 必须与签发时一致（文件绑定）；clientIP 必须与签发来源一致
+//（挑战不可跨 IP 转让），签发时未记录 IP 的旧挑战豁免该检查。
 //
 // 错误答案不消费挑战，客户端可在过期前用同一挑战重试；并发提交同一挑战时，
 // 后到的请求在锁内看到 issuing/consumed，返回 ErrChallengeConsumed。
-func (m *Manager) VerifyAndConsume(payload Payload, filePath string) error {
+func (m *Manager) VerifyAndConsume(payload Payload, filePath, clientIP string) error {
 	// 1. 校验签名（防篡改 difficulty/cost 等）
 	sig, err := m.sign(payload.Challenge.Parameters)
 	if err != nil {
@@ -290,6 +293,11 @@ func (m *Manager) VerifyAndConsume(payload Payload, filePath string) error {
 		m.mu.Unlock()
 		return ErrFileBindingMismatch
 	}
+	// 来源 IP 绑定：防止挑战被转手给其他客户端使用
+	if e.clientIP != "" && e.clientIP != clientIP {
+		m.mu.Unlock()
+		return ErrClientIPMismatch
+	}
 	// 进入 issuing，串行化同一挑战的并发提交
 	e.state = "issuing"
 	m.mu.Unlock()
@@ -302,7 +310,7 @@ func (m *Manager) VerifyAndConsume(payload Payload, filePath string) error {
 		m.mu.Lock()
 		e.state = "open"
 		m.mu.Unlock()
-		return errors.New("pow: verification rate limit exceeded")
+		return ErrVerificationBusy
 	}
 	valid := m.verifySolution(payload.Challenge.Parameters, payload.Solution)
 

@@ -169,17 +169,30 @@ func ConsumeDownloadAuthorization(tokenHash string) (DownloadAuthorization, bool
 	return a, true, nil
 }
 
-// CleanupExpiredAuthorizations 把已过期但仍为 issued 的授权标记为 expired。
-// 供后台定期清理调用，避免过期令牌长期占据 issued 状态。
-func CleanupExpiredAuthorizations() (int64, error) {
+// CleanupExpiredAuthorizations 把已过期但仍为 issued 的授权标记为 expired，
+// 并删除 expired/consumed 且超过保留期的历史行，防止表无界增长。
+// 供后台定期清理调用。
+func CleanupExpiredAuthorizations(retainDays int) (expired int64, deleted int64, err error) {
 	now := time.Now().UTC().Format(AuthzTimeFormat)
 	res, err := DB.Exec(rebind(`UPDATE download_authorizations SET status='expired'
 		WHERE status='issued' AND expires_at <= ?`), now)
 	if err != nil {
-		return 0, err
+		return 0, 0, fmt.Errorf("expire download_authorizations: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	expired, _ = res.RowsAffected()
+
+	if retainDays <= 0 {
+		return expired, 0, nil
+	}
+
+	cutoff := time.Now().UTC().AddDate(0, 0, -retainDays).Format(AuthzTimeFormat)
+	res, err = DB.Exec(rebind(`DELETE FROM download_authorizations
+		WHERE status IN ('consumed','expired') AND created_at < ?`), cutoff)
+	if err != nil {
+		return expired, 0, fmt.Errorf("delete download_authorizations: %w", err)
+	}
+	deleted, _ = res.RowsAffected()
+	return expired, deleted, nil
 }
 
 // RecordDownloadEvent 写入一次下载的事件/流量行。date 缺省为当日（UTC）。
@@ -242,7 +255,7 @@ func GetTotalCompletedFromEvents() (int64, error) {
 
 // GetDailyEventStats 返回最近 days 天的按日事件聚合（served/completed/count）。
 func GetDailyEventStats(days int) ([]EventDailyStat, error) {
-	threshold := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+	threshold := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	rows, err := DB.Query(rebind(`SELECT date,
 		COALESCE(SUM(bytes_served), 0),
 		COALESCE(SUM(CASE WHEN completed=1 THEN bytes_served ELSE 0 END), 0),

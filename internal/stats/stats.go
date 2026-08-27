@@ -357,6 +357,10 @@ func RecordVisit(r *http.Request) {
 	})
 }
 
+// RecordDownload 写入 downloads 表（旧口径）。
+//
+// Deprecated: 下载统计唯一口径已迁移至 download_events（db.RecordDownloadEvent），
+// downloads 表冻结为只读兜底；生产路径不应再调用本函数。
 func RecordDownload(r *http.Request, fileName, launcher, version string) {
 	ip := netutil.ExtractClientIP(r)
 
@@ -418,23 +422,11 @@ func GetStats(storagePath string) (*StatsData, error) {
 	if snapshot != nil {
 		age := time.Since(updatedAt)
 		if age < snapshotTTL {
-			if storagePath != "" {
-				if diskInfo, err := GetDiskUsage(storagePath); err == nil {
-					snapshot.Disk = diskInfo
-				}
-			}
-			snapshot.DroppedRecords = DroppedCount()
-			return snapshot, nil
+			return decorateSnapshot(snapshot, storagePath), nil
 		}
 		// Stale: serve old data, refresh in background
 		go RefreshSnapshot()
-		if storagePath != "" {
-			if diskInfo, err := GetDiskUsage(storagePath); err == nil {
-				snapshot.Disk = diskInfo
-			}
-		}
-		snapshot.DroppedRecords = DroppedCount()
-		return snapshot, nil
+		return decorateSnapshot(snapshot, storagePath), nil
 	}
 
 	// Cold start: no snapshot yet, compute synchronously
@@ -455,13 +447,20 @@ func GetStats(storagePath string) (*StatsData, error) {
 			DailyStats:      []DailyStat{},
 		}
 	}
+	return decorateSnapshot(snapshot, storagePath), nil
+}
+
+// decorateSnapshot 返回带实时 Disk/DroppedRecords 的快照副本。
+// 必须拷贝而非直接改写共享的缓存对象：并发请求同时读改同一 *StatsData 会构成 data race。
+func decorateSnapshot(src *StatsData, storagePath string) *StatsData {
+	dst := *src
 	if storagePath != "" {
 		if diskInfo, err := GetDiskUsage(storagePath); err == nil {
-			snapshot.Disk = diskInfo
+			dst.Disk = diskInfo
 		}
 	}
-	snapshot.DroppedRecords = DroppedCount()
-	return snapshot, nil
+	dst.DroppedRecords = DroppedCount()
+	return &dst
 }
 
 func loadSnapshot() (*StatsData, time.Time) {
@@ -531,9 +530,9 @@ func computeStatsData() *StatsData {
 
 	if db.IsMySQL() || db.IsPostgres() {
 		var wg sync.WaitGroup
-		last30VisitsQuery := "SELECT COUNT(*) FROM visits WHERE created_at > DATE_SUB(NOW(), INTERVAL 30 DAY)"
+		last30VisitsQuery := "SELECT COALESCE(SUM(visit_count), 0) FROM visits WHERE created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)"
 		if db.IsPostgres() {
-			last30VisitsQuery = "SELECT COALESCE(SUM(visit_count), 0) FROM visits WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '30 days'"
+			last30VisitsQuery = "SELECT COALESCE(SUM(visit_count), 0) FROM visits WHERE created_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days'"
 		}
 
 		wg.Add(1)
@@ -674,7 +673,10 @@ func applyDownloadAndTrafficStats(data *StatsData) {
 	data.Last30TrafficBytes = last30BaseCompleted + last30EvtCompleted
 	data.Last30ServedBytes = last30BaseServed + last30EvtServed
 
+	// 排序必须放在所有合并之后：mergeDailyTraffic 可能追加基线中独有的旧日期，
+	// 追加到尾部会破坏 mergeDailyDownloads 里已排好的顺序。
 	mergeDailyTraffic(data, dailyCompletedMap)
+	sort.Slice(data.DailyStats, func(i, j int) bool { return data.DailyStats[i].Date > data.DailyStats[j].Date })
 }
 
 func saveSnapshot(data *StatsData) error {
