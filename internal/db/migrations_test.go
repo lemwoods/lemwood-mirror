@@ -750,7 +750,7 @@ func TestDownloadAuthorizationConsumeAndEventRoundtrip(t *testing.T) {
 	}
 
 	// 清理过期授权
-	n, err := CleanupExpiredAuthorizations()
+	n, _, err := CleanupExpiredAuthorizations(30)
 	if err != nil {
 		t.Fatalf("CleanupExpiredAuthorizations error = %v", err)
 	}

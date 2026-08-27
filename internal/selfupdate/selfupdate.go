@@ -6,7 +6,9 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -317,10 +319,23 @@ func (m *Manager) Apply(ctx context.Context) (Status, error) {
 		return status, err
 	}
 
+	// 通过 GitHub API 获取资产 SHA-256 摘要用于完整性校验。
+	// 获取失败（限流/网络抖动/旧版无 digest）时降级为仅魔数校验并告警，
+	// 不阻断更新；但一旦取到摘要则必须匹配，不匹配立即失败。
+	digests := m.fetchAssetDigests(ctx, repoURL, latestVersion)
+
 	var lastErr error
 	var appliedName string
 	for _, c := range candidates {
-		if err := downloadAndReplace(ctx, httpClient, c.url, c.name, m.binaryPath, c.isArchive); err != nil {
+		expectedDigest := ""
+		if digests != nil {
+			if d, ok := digests[c.name]; ok && d != "" {
+				expectedDigest = d
+			} else {
+				log.Printf("自更新: 警告：无法获取 %s 的 SHA-256 摘要，将跳过摘要校验", c.name)
+			}
+		}
+		if err := downloadAndReplace(ctx, httpClient, c.url, c.name, m.binaryPath, c.isArchive, expectedDigest); err != nil {
 			lastErr = err
 			log.Printf("自更新: 下载 %s 失败，尝试下一候选: %v", c.name, err)
 			continue
@@ -482,7 +497,43 @@ func buildUpdateCandidates(repoURL, tag, assetProxyURL string) ([]updateCandidat
 	}, nil
 }
 
-func downloadAndReplace(ctx context.Context, httpClient *http.Client, downloadURL, assetName, targetPath string, isArchive bool) error {
+// fetchAssetDigests 通过 GitHub API 获取指定 release 全部资产的 SHA-256 摘要
+//（形如 "sha256:xxxx"）。失败时返回 nil（调用方降级为无摘要校验）。
+func (m *Manager) fetchAssetDigests(ctx context.Context, repoURL, tag string) map[string]string {
+	if m.client == nil {
+		return nil
+	}
+	owner, repo, err := gh.ParseOwnerRepo(repoURL)
+	if err != nil {
+		return nil
+	}
+	digests, err := m.client.GetReleaseAssetDigests(ctx, owner, repo, tag)
+	if err != nil {
+		log.Printf("自更新: 获取 release 资产摘要失败（跳过摘要校验）: %v", err)
+		return nil
+	}
+	if len(digests) == 0 {
+		log.Printf("自更新: release 未提供资产 SHA-256 摘要，跳过摘要校验")
+		return nil
+	}
+	return digests
+}
+
+// sha256Hex 计算文件内容的 SHA-256 十六进制摘要。
+func sha256Hex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func downloadAndReplace(ctx context.Context, httpClient *http.Client, downloadURL, assetName, targetPath string, isArchive bool, expectedSha256 string) error {
 	log.Printf("自更新: 下载 %s", assetName)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
@@ -533,6 +584,19 @@ func downloadAndReplace(ctx context.Context, httpClient *http.Client, downloadUR
 	}
 	if resp.ContentLength > 0 && written != resp.ContentLength {
 		return fmt.Errorf("下载字节数不匹配: 期望 %d, 实际 %d", resp.ContentLength, written)
+	}
+
+	// SHA-256 完整性校验：摘要来自 GitHub API（由服务端签发的资产元数据），
+	// 可检测镜像前缀/明文代理链路上的篡改。
+	if expectedSha256 != "" {
+		actual, err := sha256Hex(tmpFile)
+		if err != nil {
+			return fmt.Errorf("计算下载文件 SHA-256 失败: %w", err)
+		}
+		if !strings.EqualFold(actual, expectedSha256) {
+			return fmt.Errorf("SHA-256 校验失败: 期望 %s, 实际 %s（下载内容可能被篡改，已中止更新）", expectedSha256, actual)
+		}
+		log.Printf("自更新: SHA-256 校验通过: %s", actual[:16]+"...")
 	}
 
 	binaryPath := tmpFile
@@ -659,10 +723,16 @@ func extractFromTarGz(tgzPath string) (string, error) {
 				return "", err
 			}
 			defer out.Close()
-			if written, err := io.Copy(out, io.LimitReader(tarReader, maxExtractedBinarySize+1)); err != nil || written > maxExtractedBinarySize {
+			written, copyErr := io.Copy(out, io.LimitReader(tarReader, maxExtractedBinarySize+1))
+			if copyErr != nil {
 				out.Close()
 				os.Remove(outPath)
-				return "", err
+				return "", copyErr
+			}
+			if written > maxExtractedBinarySize {
+				out.Close()
+				os.Remove(outPath)
+				return "", fmt.Errorf("解压文件超过 %d 字节上限", maxExtractedBinarySize)
 			}
 			out.Close()
 			return outPath, nil
@@ -741,6 +811,20 @@ func renameOrCopy(src, dst string) error {
 	if err := os.Rename(src, dst); err == nil {
 		return nil
 	}
+	if runtime.GOOS == "windows" {
+		// Windows 不允许覆盖/删除正在运行的 exe：
+		// 先把旧二进制改名让位（改名自身是允许的），再落新文件。
+		oldPath := dst + ".old"
+		_ = os.Remove(oldPath)
+		if renameErr := os.Rename(dst, oldPath); renameErr == nil {
+			if err := os.Rename(src, dst); err == nil {
+				return nil
+			}
+			// 新文件落地失败，尽量回滚到旧二进制
+			_ = os.Rename(oldPath, dst)
+			return fmt.Errorf("新二进制落地失败且已回滚旧文件")
+		}
+	}
 	if err := copyFile(src, dst); err != nil {
 		return err
 	}
@@ -757,10 +841,13 @@ type progressTracker struct {
 func (pt *progressTracker) Write(p []byte) (int, error) {
 	n := len(p)
 	pt.written += int64(n)
-	if time.Since(pt.lastUpdate) > 2*time.Second {
+	if pt.total > 0 && time.Since(pt.lastUpdate) > 2*time.Second {
 		pt.lastUpdate = time.Now()
 		percentage := float64(pt.written) / float64(pt.total) * 100
 		log.Printf("自更新下载 %s: %d / %d (%.2f%%)", pt.fileName, pt.written, pt.total, percentage)
+	} else if pt.total <= 0 && time.Since(pt.lastUpdate) > 2*time.Second {
+		pt.lastUpdate = time.Now()
+		log.Printf("自更新下载 %s: 已写入 %d 字节", pt.fileName, pt.written)
 	}
 	return n, nil
 }

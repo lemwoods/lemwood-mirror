@@ -4,6 +4,7 @@ package version
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -109,17 +110,58 @@ func Compare(v1, v2 string) int {
 	}
 
 	// SemVer: 无 pre-release 的版本高于带 pre-release 的相同核心版本
-	if v1Pre == "" && v2Pre != "" {
-		return 1
+	if cmp := comparePrerelease(v1Pre, v2Pre); cmp != 0 {
+		return cmp
 	}
-	if v1Pre != "" && v2Pre == "" {
+	return 0
+}
+
+// comparePrerelease 按 SemVer §11 比较两个 pre-release 标识符串。
+// 标识符按 "." 切分：纯数字标识符按数值比较且低于字母数字标识符；
+// 字母数字标识符按 ASCII 字典序；标识符集合更长的版本更高。
+func comparePrerelease(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if a == "" {
+		return 1 // 无 pre-release 高于有 pre-release
+	}
+	if b == "" {
 		return -1
 	}
-	if v1Pre != v2Pre {
-		if v1Pre > v2Pre {
+
+	idsA := strings.Split(a, ".")
+	idsB := strings.Split(b, ".")
+	for i := 0; i < len(idsA) && i < len(idsB); i++ {
+		x, y := idsA[i], idsB[i]
+		xNum, xErr := strconv.Atoi(x)
+		yNum, yErr := strconv.Atoi(y)
+		switch {
+		case xErr == nil && yErr == nil:
+			if xNum != yNum {
+				if xNum > yNum {
+					return 1
+				}
+				return -1
+			}
+		case xErr == nil: // 数字标识符低于字母数字标识符
+			return -1
+		case yErr == nil:
 			return 1
+		default:
+			if x != y {
+				if x > y {
+					return 1
+				}
+				return -1
+			}
 		}
+	}
+	switch {
+	case len(idsA) < len(idsB):
 		return -1
+	case len(idsA) > len(idsB):
+		return 1
 	}
 	return 0
 }

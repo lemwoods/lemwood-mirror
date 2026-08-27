@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
@@ -28,6 +29,18 @@ import (
 )
 
 var Version = "dev"
+
+// safeGo 在子 goroutine 中运行 fn，panic 时记录日志而非杀死整个进程。
+func safeGo(name string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[panic] %s 已恢复: %v\n%s", name, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
 
 // resolveBinaryPath 返回当前可执行文件的真实绝对路径（解析符号链接）。
 // 自更新替换与重启都必须基于该路径，避免相对路径/symlink 启动时写错或 exec 错目标。
@@ -190,10 +203,10 @@ func (sc *Scanner) ScanAll() {
 	for _, lcfg := range sc.cfg.Launchers {
 		lcfg := lcfg
 		wg.Add(1)
-		go func() {
+		safeGo(fmt.Sprintf("扫描启动器 %s", lcfg.Name), func() {
 			defer wg.Done()
 			sc.scanLauncher(lcfg)
-		}()
+		})
 	}
 	wg.Wait()
 	log.Printf("扫描完成")
@@ -250,7 +263,7 @@ func main() {
 		log.Println("防刷墙已禁用，仅使用外部黑名单")
 	}
 
-	go auth.CleanupTokens()
+	safeGo("令牌清理", auth.CleanupTokens)
 
 	stats.InitWritePool(4, 1000)
 
@@ -275,10 +288,10 @@ func main() {
 	s.SetSelfUpdateManager(selfUpdateManager)
 
 	scanner := NewScanner(cfg, base, s, ghc)
-	go scanner.ScanAll()
+	safeGo("启动扫描", scanner.ScanAll)
 
 	if cfg.SelfUpdateEnabled {
-		go func() {
+		safeGo("启动自更新检查", func() {
 			status, err := selfUpdateManager.Check(context.Background())
 			if err != nil {
 				log.Printf("自更新检查失败: %v", err)
@@ -289,27 +302,41 @@ func main() {
 			} else {
 				log.Printf("自更新: 当前已是最新版本 %s", status.CurrentVersion)
 			}
-		}()
+		})
 	}
 
-	c := cron.New()
+	c := cron.New(cron.WithChain(cron.Recover(cron.DefaultLogger)))
 	_, err = c.AddFunc(cfg.CheckCron, scanner.ScanAll)
 	if err != nil {
 		log.Fatalf("无效的 cron 表达式 %q: %v", cfg.CheckCron, err)
 	}
 
 	// 预热 + 定时刷新统计快照，避免 /api/stats 每次跑聚合查询
-	go func() {
+	safeGo("启动预热快照", func() {
 		if err := stats.RefreshSnapshot(); err != nil {
 			log.Printf("[Stats] 启动预热快照失败: %v", err)
 		}
-	}()
+	})
 	if _, err := c.AddFunc("@every 10m", func() {
 		if err := stats.RefreshSnapshot(); err != nil {
 			log.Printf("[Stats] 定时刷新快照失败: %v", err)
 		}
 	}); err != nil {
 		log.Fatalf("无效的统计快照 cron 表达式: %v", err)
+	}
+
+	// 定期清理下载授权：标记过期并删除历史行（保留 7 天），防止表无界增长
+	if _, err := c.AddFunc("@every 1h", func() {
+		expired, deleted, cleanErr := db.CleanupExpiredAuthorizations(7)
+		if cleanErr != nil {
+			log.Printf("[清理] 下载授权清理失败: %v", cleanErr)
+			return
+		}
+		if expired > 0 || deleted > 0 {
+			log.Printf("[清理] 下载授权: 标记过期 %d 条，删除历史行 %d 条", expired, deleted)
+		}
+	}); err != nil {
+		log.Printf("注册下载授权清理任务失败: %v", err)
 	}
 
 	if cfg.SelfUpdateEnabled && cfg.SelfUpdateCheckCron != "" {
@@ -342,11 +369,24 @@ func main() {
 		return err
 	}
 
+	// httpShutdown 由 HTTP 服务器启动 goroutine 赋值，供重启前优雅关停使用。
+	var httpShutdownMu sync.Mutex
+	var httpShutdown func()
+
 	doRestart := func() error {
 		bin := resolveBinaryPath()
 		if bin == "" {
 			bin = selfUpdateManager.BinaryPath()
 		}
+		// 原地替换进程前先优雅收尾：关闭 HTTP 连接、刷掉统计写池缓冲，
+		// 避免 Exec 后丢统计、断下载连接。
+		httpShutdownMu.Lock()
+		shutdown := httpShutdown
+		httpShutdownMu.Unlock()
+		if shutdown != nil {
+			shutdown()
+		}
+		s.Close() // 释放 PoW 清理协程等后台资源
 		return restartProcess(bin, os.Args, os.Environ())
 	}
 
@@ -363,7 +403,9 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	// 使用 channel 跨 goroutine 安全地传递 srv，避免数据竞争
+	// 使用 channel 跨 goroutine 安全地传递 srv，避免数据竞争；
+	// StartHTTPWithScan 在监听成功后立即交出 *http.Server（Serve 在后台运行），
+	// 因此收到信号时几乎必然已可执行 Shutdown。
 	srvCh := make(chan *http.Server, 1)
 	go func() {
 		srv, err := server.StartHTTPWithScan(addr, s, scanner.ScanAll, scanner.ScanLauncher, func() {
@@ -372,25 +414,37 @@ func main() {
 			}
 		}, applySelfUpdate, doRestart)
 		if err != nil {
-			log.Printf("http 服务器出错: %v", err)
+			log.Fatalf("HTTP 服务启动失败: %v", err)
 		}
+		httpShutdownMu.Lock()
+		httpShutdown = func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				log.Printf("重启前 HTTP 关闭出错: %v", err)
+			}
+		}
+		httpShutdownMu.Unlock()
 		srvCh <- srv
 	}()
 
 	<-stop
 	log.Println("正在关闭服务...")
+	var srv *http.Server
 	select {
-	case srv := <-srvCh:
-		if srv != nil {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := srv.Shutdown(shutdownCtx); err != nil {
-				log.Printf("HTTP 服务关闭出错: %v", err)
-			}
-		}
-	default:
-		log.Println("HTTP 服务器尚未启动，跳过 Shutdown")
+	case srv = <-srvCh:
+	case <-time.After(3 * time.Second):
 	}
+	if srv != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP 服务关闭出错: %v", err)
+		}
+	} else {
+		log.Println("HTTP 服务器尚未就绪，跳过 Shutdown")
+	}
+	s.Close()
 	stats.CloseWritePool()
 	traffic.CloseTracker()
 	log.Println("服务已正常退出")

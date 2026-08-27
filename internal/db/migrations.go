@@ -239,6 +239,7 @@ func migrateV6AggregateKeys(d *sql.DB) error {
 	// Rows written before aggregate_key was introduced must receive the same
 	// key as current writes. Without this backfill, old rows remain outside
 	// the upsert path and statistics become split across duplicate rows.
+	var visitUpdates, eventUpdates [][2]interface{}
 	if tableExists(d, "visits") {
 		visitDate := "date(created_at)"
 		if isMySQL {
@@ -250,7 +251,6 @@ func migrateV6AggregateKeys(d *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("读取 visits 聚合键失败: %w", err)
 		}
-		var updates [][2]interface{}
 		for rows.Next() {
 			var id int64
 			var date, country, region, city, key string
@@ -259,7 +259,7 @@ func migrateV6AggregateKeys(d *sql.DB) error {
 				return err
 			}
 			if key == "" {
-				updates = append(updates, [2]interface{}{VisitAggregateKey(date, country, region, city), id})
+				visitUpdates = append(visitUpdates, [2]interface{}{VisitAggregateKey(date, country, region, city), id})
 			}
 		}
 		if err := rows.Err(); err != nil {
@@ -267,18 +267,12 @@ func migrateV6AggregateKeys(d *sql.DB) error {
 			return err
 		}
 		rows.Close()
-		for _, update := range updates {
-			if err := mergeVisitAggregateKey(d, update[0].(string), update[1].(int64)); err != nil {
-				return err
-			}
-		}
 	}
 	if tableExists(d, "download_events") {
 		rows, err := d.Query("SELECT id, COALESCE(date, ''), COALESCE(client_ip, ''), COALESCE(file_path, ''), COALESCE(launcher, ''), COALESCE(version, ''), COALESCE(country, ''), COALESCE(completed, 0), COALESCE(status_code, 0), COALESCE(aggregate_key, '') FROM download_events")
 		if err != nil {
 			return fmt.Errorf("读取 download_events 聚合键失败: %w", err)
 		}
-		var updates [][2]interface{}
 		for rows.Next() {
 			var id int64
 			var date, ip, path, launcher, version, country, key string
@@ -288,7 +282,7 @@ func migrateV6AggregateKeys(d *sql.DB) error {
 				return err
 			}
 			if key == "" {
-				updates = append(updates, [2]interface{}{aggregateKey(date, ip, path, launcher, version, country, fmt.Sprintf("%d", completed), fmt.Sprintf("%d", status)), id})
+				eventUpdates = append(eventUpdates, [2]interface{}{aggregateKey(date, ip, path, launcher, version, country, fmt.Sprintf("%d", completed), fmt.Sprintf("%d", status)), id})
 			}
 		}
 		if err := rows.Err(); err != nil {
@@ -296,11 +290,6 @@ func migrateV6AggregateKeys(d *sql.DB) error {
 			return err
 		}
 		rows.Close()
-		for _, update := range updates {
-			if err := mergeDownloadAggregateKey(d, update[0].(string), update[1].(int64)); err != nil {
-				return err
-			}
-		}
 	}
 
 	indexQueries := make([]string, 0, 2)
@@ -310,27 +299,53 @@ func migrateV6AggregateKeys(d *sql.DB) error {
 	if tableExists(d, "download_events") {
 		indexQueries = append(indexQueries, "CREATE UNIQUE INDEX uq_dlevents_aggregate_key ON download_events(aggregate_key)")
 	}
-	if !isMySQL && !isPostgres {
-		for i := range indexQueries {
-			indexQueries[i] = strings.Replace(indexQueries[i], "CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX IF NOT EXISTS ", 1)
-		}
-	} else if isPostgres {
+	if !isMySQL {
 		for i := range indexQueries {
 			indexQueries[i] = strings.Replace(indexQueries[i], "CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX IF NOT EXISTS ", 1)
 		}
 	}
+
+	// 回填合并与唯一索引创建必须在同一事务内：若任一合并（UPDATE/DELETE）之后崩溃，
+	// 全部回滚，下次启动幂等重做。否则可能留下同一 aggregate_key 的重复行，
+	// 导致唯一索引创建永久失败、服务无法启动且无法自愈。
+	tx, err := d.Begin()
+	if err != nil {
+		return fmt.Errorf("开启 v6 迁移事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, update := range visitUpdates {
+		if err := mergeVisitAggregateKey(tx, update[0].(string), update[1].(int64)); err != nil {
+			return err
+		}
+	}
+	for _, update := range eventUpdates {
+		if err := mergeDownloadAggregateKey(tx, update[0].(string), update[1].(int64)); err != nil {
+			return err
+		}
+	}
 	for _, query := range indexQueries {
-		if _, err := d.Exec(query); err != nil {
+		if _, err := tx.Exec(query); err != nil {
 			if isMySQL && isDuplicateIndexErr(err) {
 				continue
 			}
 			return fmt.Errorf("创建聚合键索引失败: %w, query: %s", err, query)
 		}
 	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交 v6 迁移事务失败: %w", err)
+	}
 	return nil
 }
 
-func mergeVisitAggregateKey(d *sql.DB, key string, id int64) error {
+// dbExecutor 抽象 *sql.DB / *sql.Tx 的公共查询接口，便于合并函数事务内复用。
+type dbExecutor interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
+func mergeVisitAggregateKey(d dbExecutor, key string, id int64) error {
 	var existing int64
 	err := d.QueryRow(rebind("SELECT id FROM visits WHERE aggregate_key=? AND id<>? LIMIT 1"), key, id).Scan(&existing)
 	if err == sql.ErrNoRows {
@@ -347,7 +362,7 @@ func mergeVisitAggregateKey(d *sql.DB, key string, id int64) error {
 	return err
 }
 
-func mergeDownloadAggregateKey(d *sql.DB, key string, id int64) error {
+func mergeDownloadAggregateKey(d dbExecutor, key string, id int64) error {
 	var existing int64
 	err := d.QueryRow(rebind("SELECT id FROM download_events WHERE aggregate_key=? AND id<>? LIMIT 1"), key, id).Scan(&existing)
 	if err == sql.ErrNoRows {
@@ -410,11 +425,17 @@ func columnExists(d *sql.DB, table, column string) (bool, error) {
 // 注：repo 镜像功能已移除，本迁移不再聚合 repo_ip_daily_traffic；
 // 已应用过 v2 的库（schema_version>=2）不会重复执行本迁移。
 func migrateV2AggregateTraffic(d *sql.DB) error {
-	var insertPrefix string
+	var insertQuery string
 	if isMySQL {
-		insertPrefix = "INSERT IGNORE INTO"
+		insertQuery = `INSERT IGNORE INTO daily_traffic (date, bytes_downloaded)
+		SELECT date, SUM(bytes_downloaded) FROM ip_daily_traffic GROUP BY date`
+	} else if isPostgres {
+		insertQuery = `INSERT INTO daily_traffic (date, bytes_downloaded)
+		SELECT date, SUM(bytes_downloaded) FROM ip_daily_traffic GROUP BY date
+		ON CONFLICT (date) DO NOTHING`
 	} else {
-		insertPrefix = "INSERT OR IGNORE INTO"
+		insertQuery = `INSERT OR IGNORE INTO daily_traffic (date, bytes_downloaded)
+		SELECT date, SUM(bytes_downloaded) FROM ip_daily_traffic GROUP BY date`
 	}
 
 	tx, err := d.Begin()
@@ -423,8 +444,7 @@ func migrateV2AggregateTraffic(d *sql.DB) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(insertPrefix + ` daily_traffic (date, bytes_downloaded)
-		SELECT date, SUM(bytes_downloaded) FROM ip_daily_traffic GROUP BY date`); err != nil {
+	if _, err := tx.Exec(insertQuery); err != nil {
 		return fmt.Errorf("聚合 daily_traffic 失败: %w", err)
 	}
 
@@ -443,19 +463,29 @@ func migrateV2AggregateTraffic(d *sql.DB) error {
 // 幂等：CREATE TABLE IF NOT EXISTS + INSERT IGNORE / INSERT OR IGNORE，
 // 重复执行不产生重复行或错误。
 func migrateV3CompletedTraffic(d *sql.DB) error {
-	var createQuery, insertPrefix string
+	var createQuery, insertQuery string
 	if isMySQL {
 		createQuery = `CREATE TABLE IF NOT EXISTS daily_completed_traffic (
 			date VARCHAR(20) PRIMARY KEY,
 			bytes_downloaded BIGINT DEFAULT 0
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
-		insertPrefix = "INSERT IGNORE INTO"
+		insertQuery = `INSERT IGNORE INTO daily_completed_traffic (date, bytes_downloaded)
+			SELECT date, bytes_downloaded FROM daily_traffic`
+	} else if isPostgres {
+		createQuery = `CREATE TABLE IF NOT EXISTS daily_completed_traffic (
+			date TEXT PRIMARY KEY,
+			bytes_downloaded BIGINT NOT NULL DEFAULT 0
+		)`
+		insertQuery = `INSERT INTO daily_completed_traffic (date, bytes_downloaded)
+			SELECT date, bytes_downloaded FROM daily_traffic
+			ON CONFLICT (date) DO NOTHING`
 	} else {
 		createQuery = `CREATE TABLE IF NOT EXISTS daily_completed_traffic (
 			date TEXT PRIMARY KEY,
 			bytes_downloaded INTEGER DEFAULT 0
 		)`
-		insertPrefix = "INSERT OR IGNORE INTO"
+		insertQuery = `INSERT OR IGNORE INTO daily_completed_traffic (date, bytes_downloaded)
+			SELECT date, bytes_downloaded FROM daily_traffic`
 	}
 
 	tx, err := d.Begin()
@@ -468,8 +498,7 @@ func migrateV3CompletedTraffic(d *sql.DB) error {
 		return fmt.Errorf("创建 daily_completed_traffic 失败: %w", err)
 	}
 
-	if _, err := tx.Exec(insertPrefix + ` daily_completed_traffic (date, bytes_downloaded)
-		SELECT date, bytes_downloaded FROM daily_traffic`); err != nil {
+	if _, err := tx.Exec(insertQuery); err != nil {
 		return fmt.Errorf("回填 daily_completed_traffic 失败: %w", err)
 	}
 
@@ -576,6 +605,50 @@ func migrateV4DownloadStatusTables(d *sql.DB) error {
 		maxIDSQL = `SELECT COALESCE(MAX(id), 0) FROM (SELECT id FROM downloads WHERE id > ? ORDER BY id LIMIT ?) t`
 	}
 
+	if isPostgres {
+		createAuthz = `CREATE TABLE IF NOT EXISTS download_authorizations (
+			authorization_id TEXT PRIMARY KEY,
+			token_hash TEXT NOT NULL UNIQUE,
+			file_path TEXT NOT NULL,
+			return_url TEXT,
+			source TEXT,
+			flow TEXT,
+			client_ip TEXT,
+			source_kind TEXT,
+			status TEXT NOT NULL DEFAULT 'issued',
+			expires_at TIMESTAMP NOT NULL,
+			max_bytes BIGINT,
+			range_limit INTEGER,
+			request_id TEXT,
+			first_transfer_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			consumed_at TIMESTAMP
+		)`
+		createEvents = `CREATE TABLE IF NOT EXISTS download_events (
+			id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+			authorization_id TEXT,
+			file_path TEXT,
+			file_name TEXT,
+			launcher TEXT,
+			version TEXT,
+			client_ip TEXT,
+			country TEXT,
+			bytes_served BIGINT NOT NULL DEFAULT 0,
+			completed INTEGER NOT NULL DEFAULT 0,
+			status_code INTEGER,
+			date TEXT,
+			source TEXT,
+			source_id BIGINT,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE (source, source_id)
+		)`
+		backfillInsert = `INSERT INTO download_events
+			(authorization_id, file_path, file_name, launcher, version, client_ip, country, bytes_served, completed, status_code, date, source, source_id, created_at)
+			SELECT '', file_name, file_name, launcher, version, '', country, 0, 0, 200, TO_CHAR(created_at, 'YYYY-MM-DD'), 'downloads_import', id, created_at FROM downloads WHERE id > $1 ORDER BY id LIMIT $2
+			ON CONFLICT DO NOTHING`
+		maxIDSQL = `SELECT COALESCE(MAX(id), 0) FROM (SELECT id FROM downloads WHERE id > $1 ORDER BY id LIMIT $2) t`
+	}
+
 	tx, err := d.Begin()
 	if err != nil {
 		return fmt.Errorf("开启事务失败: %w", err)
@@ -626,13 +699,13 @@ func migrateV4DownloadStatusTables(d *sql.DB) error {
 		var lastID int64
 		for {
 			var maxID int64
-			if err := tx.QueryRow(maxIDSQL, lastID, backfillBatch).Scan(&maxID); err != nil {
+			if err := tx.QueryRow(rebind(maxIDSQL), lastID, backfillBatch).Scan(&maxID); err != nil {
 				return fmt.Errorf("查询回填批次上界失败: %w", err)
 			}
 			if maxID == 0 {
 				break
 			}
-			if _, err := tx.Exec(backfillInsert, lastID, backfillBatch); err != nil {
+			if _, err := tx.Exec(rebind(backfillInsert), lastID, backfillBatch); err != nil {
 				return fmt.Errorf("回填 download_events 失败 (id>%d): %w", lastID, err)
 			}
 			lastID = maxID
@@ -653,11 +726,16 @@ func isDuplicateIndexErr(err error) bool {
 	return strings.Contains(msg, "DUPLICATE") || strings.Contains(msg, "1061") || strings.Contains(msg, "ALREADY EXISTS")
 }
 
-// tableExistsTx 在事务内判断表是否存在（SQLite 查 sqlite_master，MySQL 查 information_schema）。
+// tableExistsTx 在事务内判断表是否存在（SQLite 查 sqlite_master，MySQL/PG 查 information_schema）。
 func tableExistsTx(tx *sql.Tx, table string) bool {
 	if isMySQL {
 		var n int
 		err := tx.QueryRow("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", table).Scan(&n)
+		return err == nil && n > 0
+	}
+	if isPostgres {
+		var n int
+		err := tx.QueryRow("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1", table).Scan(&n)
 		return err == nil && n > 0
 	}
 	var name string

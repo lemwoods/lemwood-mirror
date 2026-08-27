@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"lemwood_mirror/internal/bandwidth"
 	"lemwood_mirror/internal/blacklist"
@@ -18,6 +19,7 @@ import (
 	"lemwood_mirror/internal/traffic"
 	"lemwood_mirror/internal/version"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -97,6 +99,34 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// maxLoginStateEntries 登录失败状态 map 的容量上限；超过时触发清扫，
+// 防止（转发头被无条件信任的异常部署下）海量伪造 IP 使内存无界增长。
+const maxLoginStateEntries = 4096
+
+// sweepLoginStateLocked 清理已过期的登录锁定，避免 map 只增不减。
+// 调用方必须持有 loginAttemptsMu。
+func (s *State) sweepLoginStateLocked(now time.Time) {
+	if len(s.loginAttempts) < maxLoginStateEntries && len(s.loginLocks) < maxLoginStateEntries {
+		return
+	}
+	for ip, unlockAt := range s.loginLocks {
+		if now.After(unlockAt) {
+			delete(s.loginLocks, ip)
+			delete(s.loginAttempts, ip)
+		}
+	}
+	if len(s.loginAttempts) >= maxLoginStateEntries {
+		s.loginAttempts = make(map[string]int)
+	}
+}
+
+// Close 释放 State 持有的后台资源（PoW 清理协程等），供优雅停机调用。
+func (s *State) Close() {
+	if mgr := s.POW(); mgr != nil {
+		mgr.Close()
+	}
 }
 
 // Conf 返回当前配置快照。后台保存会整体替换 s.Config，
@@ -345,9 +375,16 @@ func (s *State) clearLatestFlag(infoPath string) error {
 		info = fileInfo
 	}
 
-	// 如果存在 is_latest 字段且为 true，则将其设置为 false
+	// 如果存在 is_latest 字段且为 true，则将其设置为 false。
+	// 注意：info 可能与 infoCache 中的共享对象同源（来自其他写入方的浅拷贝），
+	// 必须先深拷贝再修改，避免与公开 API 的读取方产生并发读写。
 	if isLatest, exists := info["is_latest"]; exists && isLatest == true {
-		info["is_latest"] = false
+		infoCopy := make(map[string]interface{}, len(info))
+		for k, v := range info {
+			infoCopy[k] = v
+		}
+		infoCopy["is_latest"] = false
+		info = infoCopy
 
 		// 重新写入文件
 		newContent, err := json.MarshalIndent(info, "", "  ")
@@ -521,6 +558,7 @@ func (s *State) Routes(mux *http.ServeMux) {
 			return
 		}
 
+		// 路径与文件校验必须先于授权消费：任何校验失败都不应烧掉一次性 PoW 授权。
 		fullPath := filepath.Join(s.BasePath, relPath)
 		cleanPath := filepath.Clean(fullPath)
 		if !pathWithinBase(s.BasePath, cleanPath) {
@@ -551,16 +589,39 @@ func (s *State) Routes(mux *http.ServeMux) {
 			http.NotFound(w, r)
 			return
 		}
-		clientIP := netutil.ExtractClientIP(r)
 
 		switch r.Method {
 		case http.MethodHead:
+			// HEAD 不传输内容：不消费授权、不做流量预留/记账，
+			// 避免客户端探测请求白白烧掉一次性 PoW 授权。
 			http.ServeFile(w, r, cleanPath)
 			return
 		case http.MethodGet:
 		default:
+			// method 校验在授权消费之前，避免 405 请求浪费 token
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
+		}
+
+		clientIP := netutil.ExtractClientIP(r)
+
+		// 授权处理：先 Peek 做绑定校验（不消耗），全部校验通过后再原子消费，
+		// 避免 404/405/超配额/路径不匹配请求烧掉一次性授权。
+		var auth db.DownloadAuthorization
+		if token != "" {
+			peeked, ok := s.AUTHZ().Peek(token)
+			if !ok {
+				if isBrowserRequest(r) && cfg.PowEnabled {
+					http.Redirect(w, r, "/verify?file="+url.QueryEscape(relPath), http.StatusFound)
+					return
+				}
+				writeJSONError(w, http.StatusForbidden, "invalid_token", "Download token is invalid or expired")
+				return
+			}
+			if peeked.FilePath != relPath {
+				writeJSONError(w, http.StatusForbidden, "token_mismatch", "Download token does not match requested file")
+				return
+			}
 		}
 
 		estimatedBytes := traffic.EstimateTransferBytes(info.Size(), r.Header.Get("Range"))
@@ -578,26 +639,11 @@ func (s *State) Routes(mux *http.ServeMux) {
 			return
 		}
 
-		var auth db.DownloadAuthorization
 		if token != "" {
-			// 先 Peek 做绑定校验（不消耗），全部通过后再原子消费，
-			// 避免 404/405/超配额/路径不匹配请求烧掉一次性授权。
-			peeked, ok := s.AUTHZ().Peek(token)
-			if !ok {
-				if isBrowserRequest(r) && cfg.PowEnabled {
-					http.Redirect(w, r, "/verify?file="+url.QueryEscape(relPath), http.StatusFound)
-					return
-				}
-				writeJSONError(w, http.StatusForbidden, "invalid_token", "Download token is invalid or expired")
-				return
-			}
-			if peeked.FilePath != relPath {
-				traffic.FinalizeTraffic(clientIP, estimatedBytes, 0) // 释放预扣流量
-				writeJSONError(w, http.StatusForbidden, "token_mismatch", "Download token does not match requested file")
-				return
-			}
 			consumed, ok := s.AUTHZ().Consume(token)
 			if !ok {
+				// 授权并发失效：回滚刚预留的流量（按实际 0 字节结账）
+				traffic.FinalizeTraffic(clientIP, estimatedBytes, 0)
 				if isBrowserRequest(r) && cfg.PowEnabled {
 					http.Redirect(w, r, "/verify?file="+url.QueryEscape(relPath), http.StatusFound)
 					return
@@ -609,6 +655,14 @@ func (s *State) Routes(mux *http.ServeMux) {
 		}
 
 		counter := &traffic.CountingWriter{}
+		defer func() {
+			if banned, reason, trafficGB, err := traffic.FinalizeTraffic(clientIP, estimatedBytes, counter.Total); err != nil {
+				log.Printf("[防刷墙] 记录流量失败: %v", err)
+			} else if banned {
+				log.Printf("[防刷墙] IP %s 因 %s 被封禁，当日流量: %.2fGB", clientIP, reason, trafficGB)
+			}
+		}()
+
 		s.bandwidth.StartDownload()
 		defer s.bandwidth.FinishDownload()
 		countingWriter := &responseWriterCounter{
@@ -620,7 +674,10 @@ func (s *State) Routes(mux *http.ServeMux) {
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		// 强制附件下载：无扩展名文件（如 mirror-linux-amd64）浏览器需要 attachment 才弹下载
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(relPath)))
+		disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(relPath)})
+		if disposition != "" {
+			w.Header().Set("Content-Disposition", disposition)
+		}
 
 		http.ServeFile(countingWriter, r, cleanPath)
 
@@ -653,12 +710,6 @@ func (s *State) Routes(mux *http.ServeMux) {
 			} else {
 				stats.InvalidateSnapshot()
 			}
-		}
-
-		if banned, reason, trafficGB, err := traffic.FinalizeTraffic(clientIP, estimatedBytes, counter.Total); err != nil {
-			log.Printf("[防刷墙] 记录流量失败: %v", err)
-		} else if banned {
-			log.Printf("[防刷墙] IP %s 因 %s 被封禁，当日流量: %.2fGB", clientIP, reason, trafficGB)
 		}
 	})
 
@@ -816,14 +867,17 @@ func SecurityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 
 		// Public API: callers may access it from any origin.
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Latest-Version, X-Latest-Versions")
+		// Admin 控制台同源访问，不暴露跨域授权（避免放大 CSRF/凭据面）。
+		if !strings.HasPrefix(r.URL.Path, "/api/v2/admin") && !strings.HasPrefix(r.URL.Path, "/admin") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Latest-Version, X-Latest-Versions")
 
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 		}
 
 		next.ServeHTTP(w, r)
@@ -1173,6 +1227,20 @@ func (rw *responseWriterCounter) Write(p []byte) (int, error) {
 		rw.recordBytes(int64(n))
 	}
 	return n, err
+}
+
+// ReadFrom 把底层 ResponseWriter 的 io.ReaderFrom 能力透传给 http.ServeFile，
+// 恢复 Linux sendfile 零拷贝路径（包装器默认会禁用它，大文件走用户态拷贝）。
+func (rw *responseWriterCounter) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := rw.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(r)
+		rw.counter.Total += n
+		if n > 0 && rw.recordBytes != nil {
+			rw.recordBytes(n)
+		}
+		return n, err
+	}
+	return io.Copy(struct{ io.Writer }{rw}, r)
 }
 
 func isSuccessfulDownloadStatus(statusCode int) bool {

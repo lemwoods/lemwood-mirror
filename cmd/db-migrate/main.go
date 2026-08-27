@@ -40,6 +40,34 @@ var tablePlans = []tablePlan{
 	{name: "system_info", columns: "`key`, value, created_at", targetCols: `"key", value, created_at`, keyColumns: []string{"`key`"}, keyExpr: "`key`"},
 }
 
+// expandPlanColumns 按源库实际存在的列扩展迁移计划：
+// 旧版源库可能没有 v5/v6 引入的 visit_count/event_count/aggregate_key 列，
+// 盲目加入会导致 SELECT 报错；缺失则保持原计划（新列在 PG 端使用默认值 1/NULL）。
+func expandPlanColumns(source *sql.DB) {
+	for i := range tablePlans {
+		var extra []string
+		switch tablePlans[i].name {
+		case "visits":
+			extra = []string{"visit_count", "aggregate_key"}
+		case "download_events":
+			extra = []string{"event_count", "aggregate_key"}
+		default:
+			continue
+		}
+		for _, col := range extra {
+			has, err := sourceColumnExists(source, tablePlans[i].name, col)
+			if err != nil || !has {
+				continue
+			}
+			if strings.Contains(","+tablePlans[i].columns+",", ","+col+",") {
+				continue
+			}
+			tablePlans[i].columns += ", " + col
+			tablePlans[i].targetCols += ", " + col
+		}
+	}
+}
+
 func main() {
 	var sourceHost, sourceUser, sourcePassword, sourceDatabase string
 	var sourcePort, batch int
@@ -85,6 +113,8 @@ func main() {
 	if err := source.Ping(); err != nil {
 		log.Fatalf("ping MySQL source: %v", err)
 	}
+
+	expandPlanColumns(source)
 
 	targetCfg := &config.Config{
 		PostgresHost:     targetHost,
