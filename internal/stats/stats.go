@@ -416,11 +416,25 @@ type DailyStat struct {
 	TrafficBytes  int64  `json:"traffic_bytes"`
 }
 
+// cloneStatsData 返回快照的深拷贝（切片字段独立），供 GetStats 在副本上
+// 填充 Disk/DroppedRecords，避免并发请求改写共享缓存对象。
+func cloneStatsData(src *StatsData) *StatsData {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	dst.TopDownloads = append([]DownloadRank(nil), src.TopDownloads...)
+	dst.GeoDistribution = append([]GeoStat(nil), src.GeoDistribution...)
+	dst.DailyStats = append([]DailyStat(nil), src.DailyStats...)
+	return &dst
+}
+
 func GetStats(storagePath string) (*StatsData, error) {
 	snapshot, updatedAt := loadSnapshot()
 
 	if snapshot != nil {
 		age := time.Since(updatedAt)
+		snapshot = cloneStatsData(snapshot)
 		if age < snapshotTTL {
 			return decorateSnapshot(snapshot, storagePath), nil
 		}
@@ -440,6 +454,7 @@ func GetStats(storagePath string) (*StatsData, error) {
 	}
 
 	snapshot, _ = loadSnapshot()
+	snapshot = cloneStatsData(snapshot)
 	if snapshot == nil {
 		snapshot = &StatsData{
 			TopDownloads:    []DownloadRank{},

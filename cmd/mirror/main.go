@@ -42,16 +42,17 @@ func safeGo(name string, fn func()) {
 	}()
 }
 
-// resolveSelfBinaryPath 解析当前进程二进制的绝对真实路径（跟随符号链接），
-// 供自更新与重启使用。解析失败时回退 os.Args[0]。
-func resolveSelfBinaryPath() string {
-	if exe, err := os.Executable(); err == nil {
-		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-			return resolved
-		}
-		return exe
+// resolveBinaryPath 返回当前可执行文件的真实绝对路径（解析符号链接）。
+// 自更新替换与重启都必须基于该路径，避免相对路径/symlink 启动时写错或 exec 错目标。
+func resolveBinaryPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return os.Args[0]
 	}
-	return os.Args[0]
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		return resolved
+	}
+	return exe
 }
 
 type LauncherState struct {
@@ -283,7 +284,7 @@ func main() {
 	}
 
 	ghc := gh.NewClient(cfg.GitHubToken, cfg.ProxyURL)
-	selfUpdateManager := selfupdate.NewManager(ghc, Version, resolveSelfBinaryPath(), buildSelfUpdateConfig(cfg))
+	selfUpdateManager := selfupdate.NewManager(ghc, Version, resolveBinaryPath(), buildSelfUpdateConfig(cfg))
 	s.SetSelfUpdateManager(selfUpdateManager)
 
 	scanner := NewScanner(cfg, base, s, ghc)
@@ -373,7 +374,7 @@ func main() {
 	var httpShutdown func()
 
 	doRestart := func() error {
-		bin := resolveSelfBinaryPath()
+		bin := resolveBinaryPath()
 		if bin == "" {
 			bin = selfUpdateManager.BinaryPath()
 		}

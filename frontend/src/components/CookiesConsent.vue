@@ -3,20 +3,21 @@ import { onMounted, ref } from 'vue'
 import { Cookie } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import { globalConfig } from '@/lib/globalConfig'
+import { getStoredItem, setStoredItem } from '@/lib/safeStorage'
 
 const isOpen = ref(false)
 
 const { cookiesConsented } = globalConfig.storage.keys
 
 onMounted(() => {
-  const consented = localStorage.getItem(cookiesConsented)
+  const consented = getStoredItem(cookiesConsented)
   if (!consented) {
     isOpen.value = true
   }
 })
 
 const accept = () => {
-  localStorage.setItem(cookiesConsented, 'true')
+  setStoredItem(cookiesConsented, 'true')
   isOpen.value = false
 }
 </script>

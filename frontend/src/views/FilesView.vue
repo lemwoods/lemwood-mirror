@@ -19,6 +19,7 @@ import { getStatus, getLatest, getPowConfig, prepareDownload } from '@/services/
 import { getLauncherDisplayName } from '@/lib/launcher-info'
 import { cn } from '@/lib/utils'
 import { globalConfig } from '@/lib/globalConfig'
+import { openBlankTab } from '@/lib/safeStorage'
 import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
@@ -115,17 +116,20 @@ const handleDownload = async (item) => {
   const source = globalConfig.download.sourceLabels.files
 
   if (!powConfig.value.enabled) {
+    // 点击同步栈内先开占位窗口，避免 await 后 window.open 被弹窗拦截
+    const tab = openBlankTab()
     try {
       const response = await prepareDownload(filePath, returnUrl, source)
       const token = response.data.download_token
       if (token) {
+        tab?.close()
         router.push(`/download-started?token=${token}`)
       } else {
-        window.open(response.data.download_url || item.downloadUrl, '_blank')
+        tab?.navigate(response.data.download_url || item.downloadUrl)
       }
     } catch (error) {
       console.error('Prepare download error:', error)
-      window.open(item.downloadUrl, '_blank')
+      tab?.navigate(item.downloadUrl)
     }
     return
   }
@@ -312,18 +316,18 @@ const updateMetaInfo = () => {
     </div>
 
     <div class="overflow-hidden rounded-lg border bg-card text-card-foreground shadow-sm">
-      <div class="flex items-center gap-1 border-b px-3 py-2 text-sm text-muted-foreground">
-        <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="navigateToBreadcrumb(-1)">
+      <div class="flex items-center gap-1 overflow-x-auto border-b px-3 py-2 text-sm text-muted-foreground">
+        <Button variant="ghost" size="sm" class="h-7 shrink-0 whitespace-nowrap px-2 text-xs" @click="navigateToBreadcrumb(-1)">
           <Home class="mr-1 h-3.5 w-3.5" />
           根目录
         </Button>
         <template v-for="(crumb, index) in currentPath" :key="crumb.id">
           <ChevronRight class="h-3.5 w-3.5 shrink-0" />
-          <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="navigateToBreadcrumb(index)">
+          <Button variant="ghost" size="sm" class="h-7 shrink-0 whitespace-nowrap px-2 text-xs" @click="navigateToBreadcrumb(index)">
             {{ crumb.name }}
           </Button>
         </template>
-        <span v-if="copied" class="ml-auto text-xs text-muted-foreground">链接已复制</span>
+        <span v-if="copied" class="ml-auto shrink-0 whitespace-nowrap text-xs text-muted-foreground">链接已复制</span>
       </div>
 
       <div v-if="loading" class="divide-y">

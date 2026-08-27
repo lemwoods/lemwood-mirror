@@ -306,6 +306,10 @@ func createTables() error {
 			`ALTER TABLE download_events ADD COLUMN IF NOT EXISTS event_count BIGINT NOT NULL DEFAULT 1`,
 			`ALTER TABLE visits ADD COLUMN IF NOT EXISTS aggregate_key TEXT`,
 			`ALTER TABLE download_events ADD COLUMN IF NOT EXISTS aggregate_key TEXT`,
+			// 聚合键唯一索引兜底：即使 schema_version 已到位（如从备份恢复），
+			// ON CONFLICT (aggregate_key) 写入路径也要求索引存在。
+			`CREATE UNIQUE INDEX IF NOT EXISTS uq_visits_aggregate_key ON visits(aggregate_key)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS uq_dlevents_aggregate_key ON download_events(aggregate_key)`,
 		} {
 			if _, err := DB.Exec(query); err != nil {
 				return fmt.Errorf("补充 PostgreSQL 统计计数列失败: %w, query: %s", err, query)

@@ -103,7 +103,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="flex min-h-[calc(100vh-10rem)] flex-col items-center justify-center gap-4 py-8">
+  <div class="flex min-h-[calc(100vh-10rem)] flex-col items-center justify-center gap-4 py-8 supports-[height:100dvh]:min-h-[calc(100dvh-10rem)]">
     <Card class="w-full max-w-lg">
       <CardHeader class="items-center text-center">
         <div class="mb-2 rounded-full bg-primary/10 p-3 text-primary">

@@ -81,8 +81,11 @@ export function FilesPage() {
       a.download = path.split('/').pop() || 'file'
       document.body.appendChild(a)
       a.click()
-      window.URL.revokeObjectURL(url)
-      a.remove()
+      // 部分浏览器下载是异步启动的，立即 revoke 会取消保存；延迟释放。
+      setTimeout(() => {
+        window.URL.revokeObjectURL(url)
+        a.remove()
+      }, 4000)
     } catch {
       message.error('下载失败')
     }
@@ -310,7 +313,7 @@ export function FilesPage() {
             emptyText: <Empty description="暂无文件" />,
           }}
           pagination={false}
-          scroll={{ x: 700 }}
+          scroll={{ x: true }}
           size="middle"
         />
       )}

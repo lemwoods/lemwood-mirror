@@ -83,6 +83,23 @@ const solve = async (params, onProgress) => {
   return null
 }
 
+// ---- 能力检测：Web Crypto 仅在 HTTPS 安全上下文可用，老内核可能缺失 subtle ----
+
+const isPowSupported = () => {
+  try {
+    return (
+      window.isSecureContext === true &&
+      typeof window.crypto !== 'undefined' &&
+      !!window.crypto.subtle &&
+      typeof TextEncoder === 'function' &&
+      typeof atob === 'function' &&
+      typeof btoa === 'function'
+    )
+  } catch {
+    return false
+  }
+}
+
 // ---- 主流程 ----
 
 const init = async () => {
@@ -94,6 +111,14 @@ const init = async () => {
 
   if (!filePath.value) {
     errorMessage.value = '缺少文件参数'
+    verifyStatus.value = 'error'
+    isLoading.value = false
+    return
+  }
+
+  if (!isPowSupported()) {
+    errorMessage.value =
+      '当前浏览器环境不支持 Web Crypto（需要 HTTPS 连接与较新的浏览器内核），无法自动完成人机验证。您可以升级浏览器，或使用下方"绕过验证直接下载"。'
     verifyStatus.value = 'error'
     isLoading.value = false
     return
@@ -151,6 +176,12 @@ const retry = () => {
   init()
 }
 
+const directDownload = () => {
+  if (filePath.value) {
+    window.location.href = `/download/${filePath.value}`
+  }
+}
+
 onMounted(() => {
   init()
 })
@@ -161,7 +192,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex min-h-[calc(100vh-10rem)] flex-col items-center justify-center gap-4 py-8">
+  <div class="flex min-h-[calc(100vh-10rem)] flex-col items-center justify-center gap-4 py-8 supports-[height:100dvh]:min-h-[calc(100dvh-10rem)]">
     <Card class="w-full max-w-lg">
       <CardHeader class="items-center text-center">
         <div class="mb-2 rounded-full bg-primary/10 p-3 text-primary">
@@ -205,6 +236,9 @@ onUnmounted(() => {
           <Button class="w-full" @click="retry">
             <RefreshCw class="mr-2 h-4 w-4" />
             重新验证
+          </Button>
+          <Button v-if="filePath" variant="outline" class="w-full" @click="directDownload">
+            绕过验证直接下载
           </Button>
         </div>
       </CardContent>

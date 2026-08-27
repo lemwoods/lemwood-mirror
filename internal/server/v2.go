@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"lemwood_mirror/internal/auth"
+	"lemwood_mirror/internal/bandwidth"
 	"lemwood_mirror/internal/config"
 	"lemwood_mirror/internal/db"
+	"lemwood_mirror/internal/download_authz"
 	"lemwood_mirror/internal/netutil"
 	"lemwood_mirror/internal/pow"
 	"lemwood_mirror/internal/selfupdate"
@@ -178,7 +180,7 @@ func markNoStore(w http.ResponseWriter) {
 // v2AdminSwitchMiddleware 检查 admin 是否启用，未启用时返回 v2 错误信封。
 func (s *State) v2AdminSwitchMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.Config.AdminEnabled {
+		if !s.Conf().AdminEnabled {
 			writeV2Error(w, r, http.StatusForbidden, "admin_disabled", "Admin console is disabled", nil)
 			return
 		}
@@ -297,11 +299,12 @@ func (s *State) handleV2Bandwidth(w http.ResponseWriter, r *http.Request) {
 
 // handleV2PowConfig 返回 PoW 公开参数（算法/迭代数/难度），供客户端预知求解成本，信封包裹。
 func (s *State) handleV2PowConfig(w http.ResponseWriter, r *http.Request) {
-	if s.powMgr == nil {
+	mgr := s.POW()
+	if mgr == nil {
 		writeV2Success(w, r, map[string]any{"enabled": false}, false)
 		return
 	}
-	cfg := s.powMgr.PublicConfig()
+	cfg := mgr.PublicConfig()
 	markNoStore(w)
 	writeV2Success(w, r, map[string]any{
 		"enabled":    true,
@@ -315,7 +318,7 @@ func (s *State) handleV2PowConfig(w http.ResponseWriter, r *http.Request) {
 // handleV2Auth2FAStatus 返回 2FA 状态（信封包裹）。
 func (s *State) handleV2Auth2FAStatus(w http.ResponseWriter, r *http.Request) {
 	writeV2Success(w, r, map[string]bool{
-		"enabled": s.Config.TwoFactorEnabled,
+		"enabled": s.Conf().TwoFactorEnabled,
 	}, false)
 }
 
@@ -361,53 +364,54 @@ func (s *State) processLogin(r *http.Request) loginOutcome {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return loginOutcome{StatusCode: http.StatusBadRequest, Code: "bad_request", Message: "Bad Request"}
 	}
+	cfg := s.Conf()
 
-	if s.Config.AdminUser == "" || s.Config.AdminPassword == "" {
+	if cfg.AdminUser == "" || cfg.AdminPassword == "" {
 		return loginOutcome{StatusCode: http.StatusInternalServerError, Code: "admin_not_configured", Message: "Admin account not configured"}
 	}
 
 	// 验证用户名密码
-	if req.Username != s.Config.AdminUser || !auth.CheckPasswordHash(req.Password, s.Config.AdminPassword) {
+	if req.Username != cfg.AdminUser || !auth.CheckPasswordHash(req.Password, cfg.AdminPassword) {
 		s.loginAttemptsMu.Lock()
 		s.loginAttempts[ip]++
 		attempts := s.loginAttempts[ip]
-		if attempts >= s.Config.AdminMaxRetries {
-			lockUntil := time.Now().Add(time.Duration(s.Config.AdminLockDuration) * time.Minute)
+		if attempts >= cfg.AdminMaxRetries {
+			lockUntil := time.Now().Add(time.Duration(cfg.AdminLockDuration) * time.Minute)
 			s.loginLocks[ip] = lockUntil
 			log.Printf("IP %s 登录失败次数达到上限 (%d)，已锁定至 %v", ip, attempts, lockUntil.Format("2006-01-02 15:04:05"))
 			s.loginAttemptsMu.Unlock()
 			return loginOutcome{
 				StatusCode: http.StatusForbidden,
 				Code:       "account_locked",
-				Message:    fmt.Sprintf("登录失败次数过多，账号已锁定 %d 小时", s.Config.AdminLockDuration/60),
+				Message:    fmt.Sprintf("登录失败次数过多，账号已锁定 %d 小时", cfg.AdminLockDuration/60),
 			}
 		}
-		log.Printf("IP %s 登录失败 (%d/%d)", ip, attempts, s.Config.AdminMaxRetries)
+		log.Printf("IP %s 登录失败 (%d/%d)", ip, attempts, cfg.AdminMaxRetries)
 		s.loginAttemptsMu.Unlock()
 		return loginOutcome{StatusCode: http.StatusUnauthorized, Code: "invalid_credentials", Message: "Invalid credentials"}
 	}
 
 	// 验证 2FA
-	if s.Config.TwoFactorEnabled {
+	if cfg.TwoFactorEnabled {
 		if req.OTPCode == "" {
 			return loginOutcome{StatusCode: http.StatusUnauthorized, Code: "otp_required", Message: "需要验证码"}
 		}
-		if !auth.ValidateTOTP(req.OTPCode, s.Config.TwoFactorSecret) {
+		if !auth.ValidateTOTP(req.OTPCode, cfg.TwoFactorSecret) {
 			s.loginAttemptsMu.Lock()
 			s.loginAttempts[ip]++
 			attempts := s.loginAttempts[ip]
-			if attempts >= s.Config.AdminMaxRetries {
-				lockUntil := time.Now().Add(time.Duration(s.Config.AdminLockDuration) * time.Minute)
+			if attempts >= cfg.AdminMaxRetries {
+				lockUntil := time.Now().Add(time.Duration(cfg.AdminLockDuration) * time.Minute)
 				s.loginLocks[ip] = lockUntil
 				log.Printf("IP %s 2FA 验证失败次数达到上限 (%d)，已锁定至 %v", ip, attempts, lockUntil.Format("2006-01-02 15:04:05"))
 				s.loginAttemptsMu.Unlock()
 				return loginOutcome{
 					StatusCode: http.StatusForbidden,
 					Code:       "account_locked",
-					Message:    fmt.Sprintf("登录失败次数过多，账号已锁定 %d 小时", s.Config.AdminLockDuration/60),
+					Message:    fmt.Sprintf("登录失败次数过多，账号已锁定 %d 小时", cfg.AdminLockDuration/60),
 				}
 			}
-			log.Printf("IP %s 2FA 验证失败 (%d/%d)", ip, attempts, s.Config.AdminMaxRetries)
+			log.Printf("IP %s 2FA 验证失败 (%d/%d)", ip, attempts, cfg.AdminMaxRetries)
 			s.loginAttemptsMu.Unlock()
 			return loginOutcome{StatusCode: http.StatusUnauthorized, Code: "invalid_otp", Message: "验证码错误"}
 		}
@@ -433,7 +437,8 @@ func (s *State) handleV2Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value := r.Header.Get("Authorization")
-	if strings.HasPrefix(value, "Bearer ") {
+	// 兼容中间件同样接受裸 token（无 Bearer 前缀），一律撤销，避免"注销成功但 token 仍有效"
+	if value != "" {
 		auth.RevokeToken(strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")))
 	}
 	if cookie, err := r.Cookie("admin_token"); err == nil {
@@ -471,7 +476,7 @@ func (s *State) handleV2DownloadPrepare(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var req downloadPrepareRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeV2Error(w, r, http.StatusBadRequest, "bad_request", "Bad Request", nil)
@@ -513,7 +518,7 @@ func (s *State) handleV2DownloadLanding(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	auth, valid := s.authzMgr.Peek(token)
+	auth, valid := s.AUTHZ().Peek(token)
 	if !valid {
 		writeV2Error(w, r, http.StatusForbidden, "expired_token", "Download token is invalid or expired", nil)
 		return
@@ -538,7 +543,8 @@ func (s *State) handleV2DownloadChallenge(w http.ResponseWriter, r *http.Request
 		writeV2Error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method Not Allowed", nil)
 		return
 	}
-	if s.powMgr == nil {
+	mgr := s.POW()
+	if mgr == nil {
 		writeV2Error(w, r, http.StatusNotImplemented, "pow_disabled", "PoW verification is disabled", nil)
 		return
 	}
@@ -556,7 +562,7 @@ func (s *State) handleV2DownloadChallenge(w http.ResponseWriter, r *http.Request
 	}
 
 	clientIP := netutil.ExtractClientIP(r)
-	challenge, err := s.powMgr.CreateChallenge(filePath, clientIP, "web")
+	challenge, err := mgr.CreateChallenge(filePath, clientIP, "web")
 	if err != nil {
 		log.Printf("[PoW] 创建挑战失败: %v", err)
 		writeV2Error(w, r, http.StatusServiceUnavailable, "pow_busy", "Failed to create challenge", nil)
@@ -574,7 +580,8 @@ func (s *State) handleV2DownloadAuthorize(w http.ResponseWriter, r *http.Request
 		writeV2Error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method Not Allowed", nil)
 		return
 	}
-	if s.powMgr == nil {
+	mgr := s.POW()
+	if mgr == nil {
 		writeV2Error(w, r, http.StatusNotImplemented, "pow_disabled", "PoW verification is disabled", nil)
 		return
 	}
@@ -594,9 +601,9 @@ func (s *State) handleV2DownloadAuthorize(w http.ResponseWriter, r *http.Request
 	}
 
 	clientIP := netutil.ExtractClientIP(r)
-	if err := s.powMgr.VerifyAndConsume(payload, filePath, clientIP); err != nil {
+	if err := mgr.VerifyAndConsume(payload, filePath, clientIP); err != nil {
 		log.Printf("[PoW] 授权失败: nonce=%s file=%s challenges=%d err=%v",
-			payload.Challenge.Parameters.Nonce, filePath, s.powMgr.ChallengeCount(), err)
+			payload.Challenge.Parameters.Nonce, filePath, mgr.ChallengeCount(), err)
 		switch {
 		case errors.Is(err, pow.ErrChallengeNotFound), errors.Is(err, pow.ErrChallengeExpired):
 			writeV2Error(w, r, http.StatusUnauthorized, "challenge_required", "Challenge not found, expired or already consumed", nil)
@@ -756,7 +763,7 @@ func buildVersionList(versions map[string]string, infoCache map[string]map[strin
 // handleV2AdminConfig 管理后台配置读写（信封包裹）。
 func (s *State) handleV2AdminConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		cfgCopy := *s.Config
+		cfgCopy := *s.Conf()
 		cfgCopy.AdminPassword = "" // 不返回密码哈希
 		writeV2Success(w, r, cfgCopy, false)
 		return
@@ -766,7 +773,8 @@ func (s *State) handleV2AdminConfig(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 		// 以当前运行配置为基底解码：管理端漏传的字段保持现值，
 		// 避免空 JSON 结构体把未提交字段静默清零。
-		newCfg := *s.Config
+		oldCfg := s.Conf()
+		newCfg := *oldCfg
 		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
 			writeV2Error(w, r, http.StatusBadRequest, "bad_request", "Bad Request", nil)
 			return
@@ -774,7 +782,7 @@ func (s *State) handleV2AdminConfig(w http.ResponseWriter, r *http.Request) {
 
 		// 保持密码不变，除非提供了新密码
 		if newCfg.AdminPassword == "" {
-			newCfg.AdminPassword = s.Config.AdminPassword
+			newCfg.AdminPassword = oldCfg.AdminPassword
 		} else {
 			hashed, err := auth.HashPassword(newCfg.AdminPassword)
 			if err != nil {
@@ -794,8 +802,39 @@ func (s *State) handleV2AdminConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// PoW/授权/带宽参数变化时热重建对应管理器（旧 PoW 挑战作废属预期）。
+		powChanged := oldCfg.PowEnabled != newCfg.PowEnabled ||
+			oldCfg.PowHMACSecret != newCfg.PowHMACSecret ||
+			oldCfg.PowCost != newCfg.PowCost ||
+			oldCfg.PowKeyLength != newCfg.PowKeyLength ||
+			oldCfg.PowDifficulty != newCfg.PowDifficulty ||
+			oldCfg.PowChallengeTTL != newCfg.PowChallengeTTL
+		authzTTLChanged := oldCfg.DownloadTokenTTL != newCfg.DownloadTokenTTL
+		bandwidthChanged := oldCfg.BandwidthLimitMbps != newCfg.BandwidthLimitMbps
+
 		s.mu.Lock()
 		s.Config = &newCfg
+		if powChanged {
+			if s.powMgr != nil {
+				s.powMgr.Close()
+			}
+			s.powMgr = nil
+			if newCfg.PowEnabled {
+				s.powMgr = pow.NewManager(pow.Config{
+					Secret:     newCfg.PowHMACSecret,
+					Cost:       newCfg.PowCost,
+					KeyLength:  newCfg.PowKeyLength,
+					Difficulty: newCfg.PowDifficulty,
+					TTL:        parseDuration(newCfg.PowChallengeTTL, 2*time.Minute),
+				})
+			}
+		}
+		if authzTTLChanged {
+			s.authzMgr = download_authz.NewManager(parseDuration(newCfg.DownloadTokenTTL, 5*time.Minute))
+		}
+		if bandwidthChanged {
+			s.bandwidth = bandwidth.NewTracker(int64(newCfg.BandwidthLimitMbps))
+		}
 		manager := s.selfUpdate
 		s.mu.Unlock()
 
@@ -828,7 +867,7 @@ func (s *State) handleV2AdminBlacklist(w http.ResponseWriter, r *http.Request) {
 		}
 		writeV2Success(w, r, list, false)
 	case http.MethodPost:
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
 		var req struct {
 			IP     string `json:"ip"`
 			Reason string `json:"reason"`
@@ -865,13 +904,13 @@ func (s *State) handleV2AdminFiles(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		path := r.URL.Query().Get("path")
-		cleanPath, okPath := safeJoinUnderBase(s.BasePath, path)
-		if !okPath {
+		fullPath, ok := s.resolveStoragePath(path)
+		if !ok {
 			writeV2Error(w, r, http.StatusForbidden, "forbidden", "Forbidden", nil)
 			return
 		}
 
-		entries, err := os.ReadDir(cleanPath)
+		entries, err := os.ReadDir(fullPath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				writeV2Error(w, r, http.StatusNotFound, "not_found", "Directory not found", nil)
@@ -920,12 +959,13 @@ func (s *State) handleV2AdminFiles(w http.ResponseWriter, r *http.Request) {
 			writeV2Error(w, r, http.StatusBadRequest, "missing_param", "Missing path", nil)
 			return
 		}
-		fullPath, okPath := safeJoinUnderBase(s.BasePath, path)
-		if !okPath {
+		fullPath, ok := s.resolveStoragePath(path)
+		if !ok {
 			writeV2Error(w, r, http.StatusForbidden, "forbidden", "Forbidden", nil)
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<30)
 		file, _, err := r.FormFile("file")
 		if err != nil {
 			writeV2Error(w, r, http.StatusBadRequest, "bad_request", "Failed to get file: "+err.Error(), nil)
@@ -969,8 +1009,8 @@ func (s *State) handleV2AdminFileDownload(w http.ResponseWriter, r *http.Request
 		writeV2Error(w, r, http.StatusBadRequest, "missing_param", "Missing path", nil)
 		return
 	}
-	fullPath, okPath := safeJoinUnderBase(s.BasePath, path)
-	if !okPath {
+	fullPath, ok := s.resolveStoragePath(path)
+	if !ok {
 		writeV2Error(w, r, http.StatusForbidden, "forbidden", "Forbidden", nil)
 		return
 	}
@@ -987,16 +1027,6 @@ func (s *State) handleV2AdminFileDownload(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeFile(w, r, fullPath)
-}
-
-// safeJoinUnderBase 把用户提供的相对路径拼接到 base 下并用 Rel 语义校验，
-// 防止弱前缀匹配（HasPrefix）导致的兄弟目录逃逸。
-func safeJoinUnderBase(base, sub string) (string, bool) {
-	clean := filepath.Clean(filepath.Join(base, sub))
-	if !pathWithinBase(base, clean) {
-		return "", false
-	}
-	return clean, true
 }
 
 // handleV2AdminSelfUpdateStatus 自更新状态（信封包裹）。

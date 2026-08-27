@@ -312,7 +312,7 @@ export function BlacklistPage() {
             pageSizeOptions: [10, 20, 50],
             showTotal: (total) => `共 ${total} 条`,
           }}
-          scroll={{ x: 700 }}
+          scroll={{ x: true }}
           size="middle"
           locale={{ emptyText: <Empty description="暂无黑名单数据" /> }}
         />

@@ -6,6 +6,7 @@ import (
 	"io"
 	"lemwood_mirror/internal/db"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -54,22 +55,12 @@ func SyncExternalBlacklist(url string) error {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// 剥离行内注释（# 之后的内容）
-		if idx := strings.Index(line, "#"); idx >= 0 {
-			line = strings.TrimSpace(line[:idx])
-		}
-		if line == "" {
+		ip := parseBlacklistLine(line)
+		if ip == "" {
 			continue
 		}
-		// 仅当形如 ipv4:port 或 ip:注释（单个冒号）时切掉冒号后内容；
-		// IPv6 地址含多个冒号，原样保留，避免被截断成垃圾条目。
-		if strings.Count(line, ":") == 1 {
-			line = strings.TrimSpace(strings.SplitN(line, ":", 2)[0])
-		}
-		if line != "" {
-			ips = append(ips, line)
-			newExternalIPs[line] = true
-		}
+		ips = append(ips, ip)
+		newExternalIPs[ip] = true
 	}
 
 	if err := scanner.Err(); err != nil && err != io.EOF {
@@ -93,6 +84,33 @@ func IsExternalBlacklisted(ip string) bool {
 	externalIPsMu.RLock()
 	defer externalIPsMu.RUnlock()
 	return externalIPs[ip]
+}
+
+// parseBlacklistLine 从外部黑名单行提取 IP。
+// 兼容格式：纯 IP、行内 # 注释、"ip:port"（仅当冒号唯一时才按 host:port 处理，
+// 避免破坏 IPv6 地址自身的多个冒号）。无法解析为合法 IP 的行直接丢弃。
+func parseBlacklistLine(line string) string {
+	if idx := strings.Index(line, "#"); idx >= 0 {
+		line = line[:idx]
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	// 取第一个空白分隔字段
+	if fields := strings.Fields(line); len(fields) > 0 {
+		line = fields[0]
+	}
+	if net.ParseIP(line) != nil {
+		return line
+	}
+	// 唯一一个冒号才可能是 ip:port；IPv6 会有多个冒号，不能拆
+	if strings.Count(line, ":") == 1 {
+		if host, _, err := net.SplitHostPort(line); err == nil && net.ParseIP(host) != nil {
+			return host
+		}
+	}
+	return ""
 }
 
 func GetExternalBlacklistCount() int {

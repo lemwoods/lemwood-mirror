@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { Download, History, List, Package } from 'lucide-vue-next'
 import { getStatus, getLatest, getPowConfig, prepareDownload } from '@/services/api'
 import { globalConfig } from '@/lib/globalConfig'
+import { openBlankTab } from '@/lib/safeStorage'
 import Card from '@/components/ui/Card.vue'
 import Button from '@/components/ui/Button.vue'
 import Badge from '@/components/ui/Badge.vue'
@@ -96,17 +97,20 @@ const handleDownload = async (item) => {
   const source = globalConfig.download.sourceLabels.home
 
   if (!powConfig.value.enabled) {
+    // 点击同步栈内先开占位窗口，避免 await 后 window.open 被弹窗拦截
+    const tab = openBlankTab()
     try {
       const response = await prepareDownload(filePath, returnUrl, source)
       const token = response.data.download_token
       if (token) {
+        tab?.close()
         router.push(`/download-started?token=${token}`)
       } else {
-        window.open(response.data.download_url || item.latestDownloadUrl, '_blank')
+        tab?.navigate(response.data.download_url || item.latestDownloadUrl)
       }
     } catch (error) {
       console.error('Prepare download error:', error)
-      window.open(item.latestDownloadUrl, '_blank')
+      tab?.navigate(item.latestDownloadUrl)
     }
     return
   }
