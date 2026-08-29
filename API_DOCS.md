@@ -144,7 +144,7 @@ If-None-Match: W/"a1b2c3d4e5f6g7h8"
 
 #### 统一缓存
 
-JSON GET 查询接口返回 `Cache-Control: public, max-age=300`（5 分钟），服务端内部对 `/stats` 有同 TTL 的内存缓存。
+JSON GET 查询接口返回 `Cache-Control: public, max-age=300`（5 分钟），服务端内部对 `/stats` 维护快照缓存——有新下载/访问时即时失效重算，空闲时最多返回 15 分钟内的快照。
 
 ---
 
@@ -295,7 +295,7 @@ GET /api/v2/stats
 
 返回访问量、下载量、流量统计、磁盘占用、热门资源和趋势数据。
 
-**缓存：** 响应头 `Cache-Control: public, max-age=300`（5 分钟），服务端内部有同 TTL 的内存缓存，命中时 `meta.cached = true`。
+**缓存：** 响应头 `Cache-Control: public, max-age=300`（5 分钟）。服务端基于快照缓存：每次下载或访问都会主动使快照失效并在下次查询时同步重算，因此有新活动时统计数据即时更新；仅在完全空闲时最多返回 15 分钟内的快照。命中 HTTP 缓存时 `meta.cached = true`。
 
 **响应示例（`data` 字段）：**
 
@@ -382,6 +382,8 @@ GET /api/v2/bandwidth
   "peak_observed_mbps": 96.2,
   "utilization_percent": 19.2,
   "active_downloads": 3,
+  "recent_downloads": 12,
+  "recent_window_seconds": 60,
   "total_bytes_served": 5368709120,
   "measurement_window_seconds": 10,
   "updated_at": "2026-08-19T12:00:00Z"
@@ -395,7 +397,9 @@ GET /api/v2/bandwidth
 | `current_bandwidth_bps` | int | 最近 10 秒实际发送带宽，字节/秒 |
 | `peak_observed_mbps` | number | 当前进程自启动以来观测到的最高带宽 |
 | `utilization_percent` | number | 当前带宽相对配置峰值的百分比，最高显示 100 |
-| `active_downloads` | int | 当前正在传输的下载请求数 |
+| `active_downloads` | int | 当前正在传输的下载请求数（瞬时值，下载结束即归零） |
+| `recent_downloads` | int | 最近 60 秒内开始过的下载连接数（滑动窗口，连接结束后仍保留至窗口期满） |
+| `recent_window_seconds` | int | 最近下载连接的统计窗口，固定为 60 秒 |
 | `total_bytes_served` | int | 当前进程自启动以来实际写出的总字节数 |
 | `measurement_window_seconds` | int | 当前带宽计算窗口，固定为 10 秒 |
 | `updated_at` | string | 状态生成时间，RFC 3339 格式 |
