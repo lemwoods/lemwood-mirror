@@ -6,7 +6,13 @@ import (
 	"time"
 )
 
-const measurementWindow = 10 * time.Second
+const (
+	measurementWindow = 10 * time.Second
+	// recentWindow 定义「最近下载连接」的统计窗口：
+	// 瞬时并发数在秒级轮询下几乎恒为 0（下载结束立即归零），
+	// 改为统计最近 60 秒内开始过的下载连接数，对轮询展示才有观察价值。
+	recentWindow = 60 * time.Second
+)
 
 type sample struct {
 	at    time.Time
@@ -24,6 +30,9 @@ type Tracker struct {
 	active  int64
 	total   int64
 	peakBps int64
+
+	connMu    sync.Mutex
+	connTimes []time.Time // 每个下载连接的开始时刻，用于 recent 窗口统计
 }
 
 type Status struct {
@@ -33,6 +42,8 @@ type Status struct {
 	PeakObservedMbps        float64 `json:"peak_observed_mbps"`
 	UtilizationPercent      float64 `json:"utilization_percent"`
 	ActiveDownloads         int64   `json:"active_downloads"`
+	RecentDownloads         int64   `json:"recent_downloads"`
+	RecentWindowSeconds     int64   `json:"recent_window_seconds"`
 	TotalBytesServed        int64   `json:"total_bytes_served"`
 	MeasurementWindowSecond int64   `json:"measurement_window_seconds"`
 	UpdatedAt               string  `json:"updated_at"`
@@ -48,6 +59,11 @@ func NewTracker(peakMbps int64) *Tracker {
 func (t *Tracker) StartDownload() {
 	if t != nil {
 		atomic.AddInt64(&t.active, 1)
+		now := time.Now()
+		t.connMu.Lock()
+		t.connTimes = append(t.connTimes, now)
+		t.pruneConnLocked(now)
+		t.connMu.Unlock()
 	}
 }
 
@@ -82,6 +98,19 @@ func (t *Tracker) RecordBytes(n int64) {
 	t.mu.Unlock()
 }
 
+// pruneConnLocked 清理 recent 窗口之外的连接记录。
+// 连接结束时不清除条目：短连接在结束后 60s 内仍计入「1 分钟内下载连接」。
+func (t *Tracker) pruneConnLocked(now time.Time) {
+	cutoff := now.Add(-recentWindow)
+	first := 0
+	for first < len(t.connTimes) && t.connTimes[first].Before(cutoff) {
+		first++
+	}
+	if first > 0 {
+		t.connTimes = append([]time.Time(nil), t.connTimes[first:]...)
+	}
+}
+
 func (t *Tracker) Snapshot() Status {
 	if t == nil {
 		return Status{}
@@ -98,6 +127,10 @@ func (t *Tracker) Snapshot() Status {
 		elapsed = now.Sub(t.samples[0].at)
 	}
 	t.mu.Unlock()
+	t.connMu.Lock()
+	t.pruneConnLocked(now)
+	recent := int64(len(t.connTimes))
+	t.connMu.Unlock()
 	if elapsed <= 0 {
 		elapsed = time.Second
 	}
@@ -121,6 +154,8 @@ func (t *Tracker) Snapshot() Status {
 		PeakObservedMbps:        peakObservedMbps,
 		UtilizationPercent:      utilization,
 		ActiveDownloads:         atomic.LoadInt64(&t.active),
+		RecentDownloads:         recent,
+		RecentWindowSeconds:     int64(recentWindow / time.Second),
 		TotalBytesServed:        atomic.LoadInt64(&t.total),
 		MeasurementWindowSecond: int64(measurementWindow / time.Second),
 		UpdatedAt:               now.UTC().Format(time.RFC3339),

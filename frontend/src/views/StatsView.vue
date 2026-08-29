@@ -476,8 +476,8 @@ onUnmounted(() => {
               <p class="text-2xl font-bold">{{ formatMbps(bandwidth.peak_observed_mbps) }} <span class="text-sm font-normal text-muted-foreground">Mbps</span></p>
             </div>
             <div>
-              <p class="text-xs text-muted-foreground">活动下载</p>
-              <p class="text-2xl font-bold">{{ bandwidth.active_downloads ?? '-' }}</p>
+              <p class="text-xs text-muted-foreground">近1分钟下载 <span v-if="bandwidth.active_downloads" class="text-emerald-600 dark:text-emerald-400">实时 {{ bandwidth.active_downloads }}</span></p>
+              <p class="text-2xl font-bold">{{ bandwidth.recent_downloads ?? bandwidth.active_downloads ?? '-' }}</p>
             </div>
             <div>
               <p class="text-xs text-muted-foreground">累计传输</p>

@@ -163,6 +163,14 @@ func InvalidateSnapshot() {
 	lastSnapshot = nil
 	lastSnapshotTime = time.Time{}
 	snapshotMu.Unlock()
+	// 必须同时删除 DB 快照行：loadSnapshot 在内存未命中时会读到表里的旧快照，
+	// 若只清内存，下次查询会端出最长 snapshotTTL（15min）前的陈旧数据，
+	// 表现为「下载后统计面板长时间不更新」。删行后下次查询走 cold start 同步重算。
+	if db.DB != nil {
+		if _, err := db.DB.Exec(`DELETE FROM stats_snapshot WHERE id = 1`); err != nil {
+			log.Printf("[Stats] 删除统计快照失败: %v", err)
+		}
+	}
 }
 
 func DroppedCount() int64 {
