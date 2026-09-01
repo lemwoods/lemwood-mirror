@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"lemwood_mirror/internal/db"
+	"lemwood_mirror/internal/firewall"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -194,6 +195,10 @@ func (t *Tracker) ReserveTraffic(ip string, estimatedBytes int64) (bool, int64, 
 	if estimatedBytes < 0 {
 		estimatedBytes = 0
 	}
+	// 白名单 IP 豁免流量预检（自动封禁同样豁免，见 CheckAndBan）
+	if firewall.Whitelisted(ip) {
+		return true, 0, estimatedBytes, ""
+	}
 	if t.limitGB == 0 || estimatedBytes == 0 {
 		currentBytes, err := t.GetDailyTraffic(ip)
 		if err != nil {
@@ -270,6 +275,10 @@ func ToGB(bytes int64) float64 {
 
 func (t *Tracker) CheckAndBan(ip string) (bool, string, float64) {
 	if t == nil || t.limitGB == 0 {
+		return false, "", 0
+	}
+	// 白名单 IP 不参与流量自动封禁（管理员手动封禁不受影响）
+	if firewall.Whitelisted(ip) {
 		return false, "", 0
 	}
 

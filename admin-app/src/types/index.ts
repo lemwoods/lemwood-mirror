@@ -42,6 +42,10 @@ export interface Config {
   captcha_app_id: string
   captcha_secret_key?: string
   launchers: LauncherConfig[]
+  rate_limit_enabled?: boolean
+  rate_limit_per_minute?: number
+  rate_limit_ban_threshold?: number
+  firewall_whitelist?: string[]
   self_update_enabled?: boolean
   self_update_channel?: string
   self_update_check_cron?: string

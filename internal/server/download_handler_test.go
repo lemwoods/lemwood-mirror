@@ -59,7 +59,7 @@ func setupDownloadHandlerState(t *testing.T, cfg *config.Config, limitGB int, co
 		}
 	})
 
-	return state, SecurityMiddleware(mux), "/download/launcher/v1/file.txt"
+	return state, state.SecurityMiddleware(mux), "/download/launcher/v1/file.txt"
 }
 
 func setupDownloadHandlerTest(t *testing.T, limitGB int, content string) (http.Handler, string) {

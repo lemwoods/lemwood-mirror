@@ -144,6 +144,10 @@ go run ./cmd/mirror
 | `ban_record_file` | string | `"banned_ips.json"` | 封禁记录文件（存于 `storage_path` 下） |
 | `external_blacklist_url` | string | `""` | 外部黑名单同步地址（按行解析，跳过 `#` 注释） |
 | `appeal_contact` | string | — | 封禁页显示的申诉联系方式 |
+| `rate_limit_enabled` | bool | `true` | 请求频率限制开关（对全部 HTTP 请求生效，超限返回 429） |
+| `rate_limit_per_minute` | int | `300` | 单 IP 每分钟最大请求数 |
+| `rate_limit_ban_threshold` | int | `3` | 违规累计达到该值自动封禁（`ban_type=rate_limit`） |
+| `firewall_whitelist` | string[] | `[]` | IP/网段白名单（支持 CIDR），豁免频率限制、外部黑名单与流量自动封禁 |
 
 ### 数据库
 

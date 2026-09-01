@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"lemwood_mirror/internal/netutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -69,6 +70,17 @@ bandwidth_limit_mbps: {{ .BandwidthLimitMbps }}
 ban_record_file: {{ yaml .BanRecordFile }}
 external_blacklist_url: {{ yaml .ExternalBlacklistURL }}
 appeal_contact: {{ yaml .AppealContact }}
+
+# 防火墙：请求频率限制（对全部 HTTP 请求生效，违规累计达到阈值自动封禁）
+rate_limit_enabled: {{ .RateLimitEnabled }}
+rate_limit_per_minute: {{ .RateLimitPerMinute }}
+rate_limit_ban_threshold: {{ .RateLimitBanThreshold }}
+# IP/网段白名单（支持单 IP 与 CIDR，如 192.168.1.1、10.0.0.0/8），
+# 命中白名单的客户端豁免频率限制、外部黑名单与流量自动封禁
+firewall_whitelist:
+{{- range .FirewallWhitelist }}
+  - {{ yaml . }}
+{{- end }}
 
 mysql_host: {{ yaml .MySQLHost }}
 mysql_port: {{ .MySQLPort }}
@@ -198,6 +210,10 @@ type Config struct {
 	BanRecordFile          string           `json:"ban_record_file" yaml:"ban_record_file"`
 	ExternalBlacklistURL   string           `json:"external_blacklist_url" yaml:"external_blacklist_url"`
 	AppealContact          string           `json:"appeal_contact" yaml:"appeal_contact"`
+	RateLimitEnabled       bool             `json:"rate_limit_enabled" yaml:"rate_limit_enabled"`
+	RateLimitPerMinute     int              `json:"rate_limit_per_minute" yaml:"rate_limit_per_minute"`
+	RateLimitBanThreshold  int              `json:"rate_limit_ban_threshold" yaml:"rate_limit_ban_threshold"`
+	FirewallWhitelist      []string         `json:"firewall_whitelist" yaml:"firewall_whitelist"`
 	MySQLHost              string           `json:"mysql_host" yaml:"mysql_host"`
 	MySQLPort              int              `json:"mysql_port" yaml:"mysql_port"`
 	MySQLUser              string           `json:"mysql_user" yaml:"mysql_user"`
@@ -236,6 +252,10 @@ func DefaultConfig() *Config {
 		BandwidthLimitMbps:     200,
 		BanRecordFile:          "banned_ips.json",
 		AppealContact:          "QQ群 1104690837",
+		RateLimitEnabled:       true,
+		RateLimitPerMinute:     300,
+		RateLimitBanThreshold:  3,
+		FirewallWhitelist:      []string{},
 		MySQLPort:              3306,
 		PostgresPort:           5432,
 		PostgresSSLMode:        "disable",
@@ -389,6 +409,17 @@ func NormalizeConfig(cfg *Config) error {
 	}
 	if cfg.AppealContact == "" {
 		cfg.AppealContact = "QQ群 1104690837"
+	}
+	if cfg.RateLimitPerMinute <= 0 {
+		cfg.RateLimitPerMinute = 300
+	}
+	if cfg.RateLimitBanThreshold <= 0 {
+		cfg.RateLimitBanThreshold = 3
+	}
+	for _, entry := range cfg.FirewallWhitelist {
+		if !netutil.ValidEntry(entry) {
+			return fmt.Errorf("无效的 firewall_whitelist 条目 %q，需要合法 IP 或 CIDR 网段", entry)
+		}
 	}
 	if cfg.PowAlgorithm == "" {
 		cfg.PowAlgorithm = "PBKDF2-SHA256"

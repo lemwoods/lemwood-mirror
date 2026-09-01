@@ -585,7 +585,9 @@ paths:
       description: |
         Updates the server configuration. If `admin_password` is empty, the existing
         password hash is preserved; otherwise the new password is hashed and stored.
-        Response is wrapped in the v2 envelope.
+        Firewall fields (`rate_limit_*`, `firewall_whitelist`) are preserved from the
+        current config when omitted from the request body, and take effect immediately
+        without a restart. Response is wrapped in the v2 envelope.
       operationId: postV2AdminConfig
       security:
         - BearerAuth: []
@@ -653,8 +655,10 @@ paths:
           $ref: '#/components/responses/InternalError'
     post:
       tags: [Admin]
-      summary: Add IP to blacklist
-      description: Adds an IP address to the blacklist, wrapped in the v2 envelope.
+      summary: Add IP/CIDR to blacklist
+      description: |
+        Adds an IP address or CIDR network range to the blacklist, wrapped in the v2 envelope.
+        Entries are validated server-side; invalid IP/CIDR values are rejected with 400 `invalid_param`.
       operationId: postV2AdminBlacklist
       security:
         - BearerAuth: []
@@ -1863,6 +1867,26 @@ components:
         appeal_contact:
           type: string
           example: QQ群 https://qm.qq.com/q/FOGt99aayY
+        rate_limit_enabled:
+          type: boolean
+          example: true
+          description: Enable per-IP request rate limiting (applies to all HTTP requests)
+        rate_limit_per_minute:
+          type: integer
+          example: 300
+          description: Max requests per minute per IP
+        rate_limit_ban_threshold:
+          type: integer
+          example: 3
+          description: Number of rate-limit violations before the IP is auto-banned
+        firewall_whitelist:
+          type: array
+          items:
+            type: string
+          example: ["192.168.1.1", "10.0.0.0/8"]
+          description: |
+            IP/CIDR whitelist. Whitelisted clients are exempt from rate limiting,
+            the external blacklist, and traffic-based auto bans (manual bans still apply).
         mysql_host:
           type: string
         mysql_port:
@@ -1923,11 +1947,12 @@ components:
 
     BlacklistRequest:
       type: object
-      description: Request body for adding an IP to the blacklist.
+      description: Request body for adding an IP or CIDR range to the blacklist.
       properties:
         ip:
           type: string
-          example: 1.2.3.4
+          example: 10.0.0.0/8
+          description: IPv4/IPv6 address or CIDR network range (e.g. 1.2.3.4, 10.0.0.0/8)
         reason:
           type: string
           example: manual ban

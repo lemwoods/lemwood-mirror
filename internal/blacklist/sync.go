@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"lemwood_mirror/internal/db"
+	"lemwood_mirror/internal/firewall"
 	"log"
 	"net"
 	"net/http"
@@ -74,6 +75,11 @@ func SyncExternalBlacklist(url string) error {
 
 	if err := db.AddExternalBlacklist(ips); err != nil {
 		return err
+	}
+
+	// 外部源可能包含 CIDR 网段条目，刷新内存网段集合
+	if err := firewall.RefreshBlacklist(); err != nil {
+		log.Printf("[黑名单同步] 刷新网段黑名单失败: %v", err)
 	}
 
 	log.Printf("[黑名单同步] 成功同步 %d 个外部黑名单IP", len(ips))

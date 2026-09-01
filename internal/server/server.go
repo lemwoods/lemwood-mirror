@@ -12,6 +12,7 @@ import (
 	"lemwood_mirror/internal/config"
 	"lemwood_mirror/internal/db"
 	"lemwood_mirror/internal/download_authz"
+	"lemwood_mirror/internal/firewall"
 	"lemwood_mirror/internal/netutil"
 	"lemwood_mirror/internal/pow"
 	"lemwood_mirror/internal/selfupdate"
@@ -25,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -831,25 +833,68 @@ func containsDotDot(v string) bool {
 	return false
 }
 
-func SecurityMiddleware(next http.Handler) http.Handler {
+// SecurityMiddleware 站点级防护：黑名单（精确 IP 查库 + CIDR 内存匹配 + 外部同步）、
+// 请求频率限制、路径遍历拦截与安全响应头。白名单 IP 豁免外部黑名单与频率限制，
+// 但不豁免本地黑名单（管理员手动封禁始终生效）。
+func (s *State) SecurityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := netutil.ExtractClientIP(r)
+		appeal := s.Config.AppealContact
+		if appeal != "" {
+			appeal = fmt.Sprintf("如有误封，请联系 %s", appeal)
+		}
 
-		// 检查本地黑名单
+		// 本地黑名单（精确 IP：管理员手动 + 防刷墙/防火墙自动封禁）
 		if banned, createdAt, _ := db.GetIPBlacklistInfo(ip); banned {
-			log.Printf("[防刷墙] 拒绝来自黑名单 IP 的访问: %s，封禁时间: %s，如有误封请联系 QQ群 %s", ip, createdAt, "1104690837")
-			http.Error(w, fmt.Sprintf("Access Denied: Your IP %s was banned at %s. 如有误封，请加 QQ群 1104690837 申诉", ip, createdAt), http.StatusForbidden)
+			log.Printf("[防火墙] 拒绝来自黑名单 IP 的访问: %s，封禁时间: %s", ip, createdAt)
+			message := fmt.Sprintf("Access Denied: Your IP %s was banned at %s.", ip, createdAt)
+			if appeal != "" {
+				message = fmt.Sprintf("%s %s", message, appeal)
+			}
+			http.Error(w, message, http.StatusForbidden)
 			return
 		}
 
-		// 检查外部黑名单
-		if blacklist.IsExternalBlacklisted(ip) {
-			log.Printf("[防刷墙] 拒绝来自外部黑名单 IP 的访问: %s", ip)
-			http.Error(w, fmt.Sprintf("Access Denied: Your IP %s is in the external blacklist. 如有误封，请加 QQ群 1104690837 申诉", ip), http.StatusForbidden)
+		// 网段封禁（CIDR 条目，内存匹配）
+		if firewall.MatchBlacklistCIDR(ip) {
+			log.Printf("[防火墙] 拒绝来自黑名单网段的访问: %s", ip)
+			message := fmt.Sprintf("Access Denied: Your IP %s is in a banned network range.", ip)
+			if appeal != "" {
+				message = fmt.Sprintf("%s %s", message, appeal)
+			}
+			http.Error(w, message, http.StatusForbidden)
 			return
 		}
 
-		// 记录访问（仅在通过黑名单检查后）
+		// 外部黑名单（白名单豁免）
+		if !firewall.Whitelisted(ip) && blacklist.IsExternalBlacklisted(ip) {
+			log.Printf("[防火墙] 拒绝来自外部黑名单 IP 的访问: %s", ip)
+			message := fmt.Sprintf("Access Denied: Your IP %s is in the external blacklist.", ip)
+			if appeal != "" {
+				message = fmt.Sprintf("%s %s", message, appeal)
+			}
+			http.Error(w, message, http.StatusForbidden)
+			return
+		}
+
+		// 请求频率限制（白名单豁免；违规累计达阈值由 firewall 自动封禁）
+		if !firewall.Whitelisted(ip) {
+			if decision := firewall.Allow(ip); !decision.Allowed {
+				log.Printf("[防火墙] IP %s 请求频率超限，拒绝访问（Retry-After %s）", ip, decision.RetryAfter)
+				if decision.Banned {
+					log.Printf("[防火墙] IP %s %s", ip, decision.Reason)
+				}
+				retrySeconds := int(decision.RetryAfter.Seconds())
+				if retrySeconds < 1 {
+					retrySeconds = 1
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+				http.Error(w, "Too Many Requests: 请求频率超过限制，请稍后重试", http.StatusTooManyRequests)
+				return
+			}
+		}
+
+		// 记录访问（仅在通过防火墙检查后）
 		stats.RecordVisit(r)
 
 		path := r.URL.Path

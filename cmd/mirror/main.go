@@ -22,6 +22,7 @@ import (
 	"lemwood_mirror/internal/db"
 	"lemwood_mirror/internal/downloader"
 	gh "lemwood_mirror/internal/github"
+	"lemwood_mirror/internal/firewall"
 	"lemwood_mirror/internal/selfupdate"
 	"lemwood_mirror/internal/server"
 	"lemwood_mirror/internal/stats"
@@ -263,6 +264,27 @@ func main() {
 		log.Println("防刷墙已禁用，仅使用外部黑名单")
 	}
 
+	// 防火墙：请求频率限制 + 白名单 + 网段黑名单（自动封禁写 DB 后同步封禁记录文件）
+	firewall.Init(firewall.Settings{
+		Enabled:      cfg.RateLimitEnabled,
+		PerMinute:    cfg.RateLimitPerMinute,
+		BanThreshold: cfg.RateLimitBanThreshold,
+	}, cfg.FirewallWhitelist, func(ip, reason string) error {
+		if err := db.AddIPToBlacklistWithSource(ip, reason, "local", "rate_limit"); err != nil {
+			return err
+		}
+		traffic.SyncBanRecord()
+		return nil
+	})
+	if err := firewall.RefreshBlacklist(); err != nil {
+		log.Printf("[防火墙] 加载网段黑名单失败: %v", err)
+	}
+	if cfg.RateLimitEnabled {
+		log.Printf("防火墙已启用: 单IP每分钟请求上限 %d，违规 %d 次自动封禁，白名单 %d 条", cfg.RateLimitPerMinute, cfg.RateLimitBanThreshold, len(cfg.FirewallWhitelist))
+	} else {
+		log.Println("防火墙频率限制已禁用（黑名单/白名单仍生效）")
+	}
+
 	safeGo("令牌清理", auth.CleanupTokens)
 
 	stats.InitWritePool(4, 1000)
@@ -447,5 +469,6 @@ func main() {
 	s.Close()
 	stats.CloseWritePool()
 	traffic.CloseTracker()
+	firewall.Close()
 	log.Println("服务已正常退出")
 }

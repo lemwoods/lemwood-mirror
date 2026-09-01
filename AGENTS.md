@@ -30,7 +30,8 @@
 - `internal/download_authz/` — DB 授权状态表（`download_authorizations`）：43 字符 base64url token，DB 存 sha256 hash；Issue/Peek/Consume（atomic 单次消费）。见下"PoW 下载验证"。
 - `internal/auth/` — 管理员认证 + TOTP，`CleanupTokens()` 后台清理。
 - `internal/assets/` — 启动时把内嵌前端释放到项目根目录。
-- `internal/blacklist/` / `internal/netutil/`（客户端 IP 解析）/ `internal/storage/` — 各自独立小包。
+- `internal/firewall/` — 站点级防火墙（见下「防火墙」）。
+- `internal/blacklist/` / `internal/netutil/`（客户端 IP 解析 + `ParseEntry`/`ValidEntry` IP/CIDR 解析）/ `internal/storage/` — 各自独立小包。
 
 ## 数据库
 
@@ -49,6 +50,23 @@
 - `GITHUB_TOKEN` 环境变量覆盖 yaml 里的 `github_token`。
 - `NormalizeConfig` 不变量：`traffic_limit_gb < 0` → 5；`max_versions ≤ 0` → 3；`admin_enabled` 但 user/password 空 → 自动禁用后台；`check_cron` 空 → `*/10 * * * *`。
 - 密码用 bcrypt 哈希：`htpasswd -bnBC 14 "" <password> | tr -d ':\n'`。
+
+## 本地数据库环境（2026-09-01 搭建，供迁移集成测试）
+
+- 已安装 PostgreSQL 18.6 与 MySQL 8.4.11（Ubuntu apt）。**端口按仓库集成测试约定**：PG = 127.0.0.1:55432，MySQL = 127.0.0.1:33306（PG 改 `port` 于 `/etc/postgresql/18/main/postgresql.conf`；MySQL 改 `/etc/mysql/mysql.conf.d/mysqld.cnf` 追加 `port = 33306` 与 `mysql_native_password=ON`，8.4 默认禁用该插件而 go-sql-driver DSN 未带 allowPublicKeyRetrieval，必须开）。
+- 凭据：PG 用户 `lemwood`（superuser，pg_hba 对 127.0.0.1/::1 为 trust，免密）；MySQL 用户 `lemwood`/`testpass`（mysql_native_password，GRANT ALL ON *.*，仅回环）。
+- 集成测试：`LEMWOOD_MIGRATION_INTEGRATION=1 go test ./internal/db/`（默认 skip）。覆盖：MySQL→PG 与 SQLite→PG 内置清洗迁移、CIDR 黑名单三方言读写、SQLite→MySQL 一次性迁移携带 CIDR。PG 目标库测试内自动 drop/recreate（`resetPostgresTestDB`），可重复跑；清洗迁移有一次性完成标记，换库才能重测。
+- 已建库：`lemwood_builtin_test`、`lemwood_builtin_sqlite_test`、`lemwood_fw_test`（PG+MySQL 同名）、`lemwood_source`（MySQL）。
+- 部署实测结论（2026-09-01，SQLite→PG→MySQL 三阶段切换）：`ip_blacklist` 的 CIDR 条目在三方言下均按 TEXT 精确存取，无需 schema 变更；迁移后防刷墙流量状态（download_events 当日 bytes）与统计口径完整保留；管理端 CIDR 增删 + 内存网段匹配在三种后端下均即时生效。
+
+## 防火墙（2026-09 起）
+
+- `internal/firewall/` 单例管理器，`Init(Settings, whitelist, banFunc)` 在 main.go 启动时调用；`UpdateSettings` 支持管理后台保存配置后热更新（无需重启）。**依赖方向**：firewall → db/netutil；config → netutil（白名单校验）。**config 绝不能 import firewall**（db 依赖 config，会成环），所以 IP/CIDR 解析函数放在 `netutil.ParseEntry/ValidEntry` 三方共用。
+- **三层拦截**（`SecurityMiddleware`，现为 `(s *State)` 方法，读取 `Config.AppealContact` 替代了旧硬编码 QQ 群号）：① 本地黑名单精确 IP 查 DB；② CIDR 网段封禁内存匹配（`RefreshBlacklist` 从 `ip_blacklist` 表读取含 `/` 的条目构建，管理员增删/自动封禁/外部同步后都要调用刷新）；③ 外部黑名单。频率限制（429 + Retry-After）在黑名单检查之后。
+- **请求频率限制**：固定 1 分钟窗口（`Allow`），超限记违规，违规 30 分钟 TTL，累计达 `rate_limit_ban_threshold` 自动写黑名单（source=local，ban_type=rate_limit）。封禁动作通过 `Init` 注入的 `BanFunc` 回调执行（写 DB + `traffic.SyncBanRecord`），firewall 包不反向依赖 traffic。未 Init 或 settings.Enabled=false 时全部放行——**这是 server 包测试不受防火墙影响的关键**（firewall 是包级单例，测试用完要 `Close()` 或重新 `Init` 复位）。
+- **白名单语义**：豁免频率限制、外部黑名单、流量预检与自动封禁（traffic `ReserveTraffic`/`CheckAndBan` 开头有豁免分支）；**不豁免本地黑名单**（管理员手动封禁始终生效）。
+- 配置项：`rate_limit_enabled`(true)/`rate_limit_per_minute`(300)/`rate_limit_ban_threshold`(3)/`firewall_whitelist`([]string, IP 或 CIDR，NormalizeConfig 校验合法性)。`handleV2AdminConfig` POST 对这 4 个字段做**缺键保留原值**（管理端表单只提交注册过的字段，不做保护会在 UI 保存时清空白名单）；黑名单 POST 用 `netutil.ValidEntry` 校验 IP/CIDR，非法返回 400。
+- 管理端 UI：ConfigPage「防火墙设置」卡片；BlacklistPage 添加表单支持 CIDR（前端轻校验 + 后端权威校验），「自动封禁」分类已修正为匹配 source `local`（旧代码只匹配不存在的 `auto` 值，自动封禁记录一直显示"未知"）。
 
 ## 流量统计双口径（2026-08 起）
 

@@ -334,6 +334,30 @@ export function ConfigPage() {
         </Form.Item>
       </Card>
 
+      <Card title="防火墙设置" style={{ marginBottom: 16 }}>
+        <Form.Item
+          name="rate_limit_enabled"
+          label="启用请求频率限制"
+          valuePropName="checked"
+          extra="对全部 HTTP 请求生效，超限返回 429；违规累计达到阈值自动封禁"
+        >
+          <Switch />
+        </Form.Item>
+        <Form.Item name="rate_limit_per_minute" label="单 IP 每分钟请求上限">
+          <InputNumber min={1} style={{ width: isMobile ? '100%' : 200 }} />
+        </Form.Item>
+        <Form.Item name="rate_limit_ban_threshold" label="自动封禁违规次数">
+          <InputNumber min={1} style={{ width: isMobile ? '100%' : 200 }} />
+        </Form.Item>
+        <Form.Item
+          name="firewall_whitelist"
+          label="IP/网段白名单"
+          extra="支持单 IP 与 CIDR 网段（如 192.168.1.1、10.0.0.0/8），白名单豁免频率限制、外部黑名单与流量自动封禁"
+        >
+          <Select mode="tags" placeholder="输入 IP 或网段后回车" open={false} tokenSeparators={[',']} />
+        </Form.Item>
+      </Card>
+
       <Card title="高级设置" style={{ marginBottom: 16 }}>
         <Form.Item name="concurrent_downloads" label="并发下载数">
           <InputNumber min={1} max={10} style={{ width: isMobile ? '100%' : 200 }} />

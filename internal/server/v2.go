@@ -14,6 +14,7 @@ import (
 	"lemwood_mirror/internal/config"
 	"lemwood_mirror/internal/db"
 	"lemwood_mirror/internal/download_authz"
+	"lemwood_mirror/internal/firewall"
 	"lemwood_mirror/internal/netutil"
 	"lemwood_mirror/internal/pow"
 	"lemwood_mirror/internal/selfupdate"
@@ -838,6 +839,13 @@ func (s *State) handleV2AdminConfig(w http.ResponseWriter, r *http.Request) {
 		manager := s.selfUpdate
 		s.mu.Unlock()
 
+		// 防火墙设置热更新（无需重启）
+		firewall.UpdateSettings(firewall.Settings{
+			Enabled:      newCfg.RateLimitEnabled,
+			PerMinute:    newCfg.RateLimitPerMinute,
+			BanThreshold: newCfg.RateLimitBanThreshold,
+		}, newCfg.FirewallWhitelist)
+
 		if manager != nil {
 			manager.UpdateConfig(selfupdate.Config{
 				Enabled:       newCfg.SelfUpdateEnabled,
@@ -876,9 +884,17 @@ func (s *State) handleV2AdminBlacklist(w http.ResponseWriter, r *http.Request) {
 			writeV2Error(w, r, http.StatusBadRequest, "bad_request", "Bad Request", nil)
 			return
 		}
+		req.IP = strings.TrimSpace(req.IP)
+		if !netutil.ValidEntry(req.IP) {
+			writeV2Error(w, r, http.StatusBadRequest, "invalid_param", "ip 必须是合法的 IP 地址或 CIDR 网段（如 1.2.3.4、10.0.0.0/8）", nil)
+			return
+		}
 		if err := db.AddIPToBlacklist(req.IP, req.Reason); err != nil {
 			writeV2Error(w, r, http.StatusInternalServerError, "internal_error", err.Error(), nil)
 			return
+		}
+		if err := firewall.RefreshBlacklist(); err != nil {
+			log.Printf("[防火墙] 刷新网段黑名单失败: %v", err)
 		}
 		traffic.SyncBanRecord()
 		writeV2Success(w, r, map[string]string{"message": "added"}, false, http.StatusCreated)
@@ -891,6 +907,9 @@ func (s *State) handleV2AdminBlacklist(w http.ResponseWriter, r *http.Request) {
 		if err := db.RemoveIPFromBlacklist(ip); err != nil {
 			writeV2Error(w, r, http.StatusInternalServerError, "internal_error", err.Error(), nil)
 			return
+		}
+		if err := firewall.RefreshBlacklist(); err != nil {
+			log.Printf("[防火墙] 刷新网段黑名单失败: %v", err)
 		}
 		traffic.SyncBanRecord()
 		writeV2Success(w, r, map[string]string{"message": "removed"}, false)

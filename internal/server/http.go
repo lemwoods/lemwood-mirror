@@ -38,7 +38,7 @@ func StartHTTPWithScan(addr string, s *State, scanFunc func(), launcherScanFunc 
 	staticDir := filepath.Join(s.ProjectRoot, s.getFrontendThemeDir())
 	handler := SPAFallbackMiddleware(mux, staticDir)
 
-	handler = SecurityMiddleware(handler)
+	handler = s.SecurityMiddleware(handler)
 
 	srv := &http.Server{
 		Addr:         addr,

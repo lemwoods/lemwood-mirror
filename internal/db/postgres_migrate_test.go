@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,7 @@ func TestPostgresBuiltInMigrationIntegration(t *testing.T) {
 		DB.Close()
 		DB = nil
 	}
+	resetPostgresTestDB(t, "127.0.0.1", 55432, getenv("USER"), "lemwood_builtin_test")
 	cfg := &config.Config{
 		DatabaseMode: "pgsql",
 		MySQLHost:    "127.0.0.1", MySQLPort: 33306, MySQLUser: "lemwood", MySQLPassword: "testpass", MySQLDatabase: "lemwood_source",
@@ -68,6 +70,7 @@ func TestPostgresBuiltInMigrationFallsBackToSQLiteIntegration(t *testing.T) {
 		`CREATE TABLE system_info (key TEXT PRIMARY KEY, value TEXT)`,
 		`INSERT INTO visits VALUES (1,'CN','A','B','2026-08-20 01:00:00'),(2,'CN','A','B','2026-08-20 02:00:00')`,
 		`INSERT INTO download_events VALUES (1,'a','a','fcl','1','1.2.3.4','CN',100,1,200,'2026-08-20'),(2,'a','a','fcl','1','1.2.3.4','CN',200,1,200,'2026-08-20')`,
+		`INSERT INTO ip_blacklist VALUES ('203.0.113.0/24','网段封禁','local','traffic','2026-08-20 00:00:00'),('198.51.100.7','手动封禁','manual','manual','2026-08-20 00:00:00')`,
 		`INSERT INTO system_info VALUES ('start_time','2026-08-20 00:00:00')`,
 	}
 	for _, query := range queries {
@@ -82,6 +85,7 @@ func TestPostgresBuiltInMigrationFallsBackToSQLiteIntegration(t *testing.T) {
 		DB.Close()
 		DB = nil
 	}
+	resetPostgresTestDB(t, "127.0.0.1", 55432, getenv("USER"), "lemwood_builtin_sqlite_test")
 	cfg := &config.Config{
 		DatabaseMode: "pgsql",
 		MySQLHost:    "127.0.0.1", MySQLPort: 1, MySQLUser: "invalid", MySQLDatabase: "invalid",
@@ -102,10 +106,44 @@ func TestPostgresBuiltInMigrationFallsBackToSQLiteIntegration(t *testing.T) {
 	if visits != 2 || events != 2 || bytes != 300 {
 		t.Fatalf("fallback aggregates visits/events/bytes=%d/%d/%d", visits, events, bytes)
 	}
+
+	// 防火墙黑名单（含 CIDR 网段条目）应原样迁移到 PostgreSQL
+	var banned int
+	if err := DB.QueryRow("SELECT COUNT(*) FROM ip_blacklist WHERE ip IN ('203.0.113.0/24','198.51.100.7')").Scan(&banned); err != nil {
+		t.Fatal(err)
+	}
+	if banned != 2 {
+		t.Fatalf("ip_blacklist migrated rows = %d, want 2 (CIDR + exact)", banned)
+	}
+	var banType string
+	if err := DB.QueryRow("SELECT ban_type FROM ip_blacklist WHERE ip = '203.0.113.0/24'").Scan(&banType); err != nil {
+		t.Fatal(err)
+	}
+	if banType != "traffic" {
+		t.Fatalf("CIDR entry ban_type = %q, want traffic", banType)
+	}
 }
 
 func getenv(name string) string {
 	return os.Getenv(name)
+}
+
+// resetPostgresTestDB 删除并重建目标库，使集成测试可重复运行：
+// 清洗迁移有一次性完成标记（system_info.postgres_clean_migration_v1），
+// 复用旧库会让后续运行跳过迁移，断言到的是上一轮的残留数据。
+func resetPostgresTestDB(t *testing.T, host string, port int, user, dbname string) {
+	t.Helper()
+	admin, err := sql.Open("pgx", fmt.Sprintf("postgres://%s@%s:%d/postgres?sslmode=disable", user, host, port))
+	if err != nil {
+		t.Fatalf("open postgres admin db: %v", err)
+	}
+	defer admin.Close()
+	if _, err := admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", dbname)); err != nil {
+		t.Fatalf("drop test database %s: %v", dbname, err)
+	}
+	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE %s OWNER %s", dbname, user)); err != nil {
+		t.Fatalf("create test database %s: %v", dbname, err)
+	}
 }
 
 func TestOpenPreferredMigrationSourceFallsBackToSQLite(t *testing.T) {

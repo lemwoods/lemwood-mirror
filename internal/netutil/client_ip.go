@@ -6,6 +6,31 @@ import (
 	"strings"
 )
 
+// ParseEntry 将 IP 或 CIDR 网段条目解析为精确 IP 或网段，
+// 两者都失败时返回 ok=false（供黑名单/白名单校验共用）。
+func ParseEntry(s string) (exact net.IP, cidr *net.IPNet, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil, false
+	}
+	if strings.Contains(s, "/") {
+		if _, ipnet, err := net.ParseCIDR(s); err == nil {
+			return nil, ipnet, true
+		}
+		return nil, nil, false
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		return ip, nil, true
+	}
+	return nil, nil, false
+}
+
+// ValidEntry 报告条目是否为合法的 IP 或 CIDR 网段。
+func ValidEntry(s string) bool {
+	_, _, ok := ParseEntry(s)
+	return ok
+}
+
 // ExtractClientIP returns the canonical client IP from common proxy headers.
 //
 // Forwarding headers are trusted only from local/private reverse proxies,

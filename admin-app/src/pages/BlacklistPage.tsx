@@ -36,7 +36,7 @@ import dayjs from 'dayjs'
 
 const { Title, Text } = Typography
 
-type SourceType = 'manual' | 'external' | 'auto' | string
+type SourceType = 'manual' | 'external' | 'auto' | 'local' | string
 
 type FilterType = 'all' | SourceType
 
@@ -47,11 +47,18 @@ const SOURCE_META: Record<
   manual: { label: '手动', color: 'blue', icon: <UserOutlined /> },
   external: { label: '外部同步', color: 'orange', icon: <GlobalOutlined /> },
   auto: { label: '自动封禁', color: 'red', icon: <RobotOutlined /> },
+  // 后端自动封禁（流量超限/频率超限）写入的 source 是 local
+  local: { label: '自动封禁', color: 'red', icon: <RobotOutlined /> },
 }
 
 function getSourceMeta(source: SourceType) {
   return SOURCE_META[source] || { label: source || '未知', color: 'default', icon: <TeamOutlined /> }
 }
+
+const isAutoSource = (source: string) => source === 'auto' || source === 'local'
+
+// 与后端一致的轻量校验：IPv4/IPv6 或 CIDR 网段（权威校验在服务端）
+const IP_OR_CIDR_RE = /^(?:\d{1,3}(?:\.\d{1,3}){3})(?:\/\d{1,2})?$|^[0-9A-Fa-f:]+(?:\/\d{1,3})?$/
 
 export function BlacklistPage() {
   const [data, setData] = useState<BlacklistItem[]>([])
@@ -83,7 +90,8 @@ export function BlacklistPage() {
 
   const filteredData = useMemo(() => {
     return data.filter((item) => {
-      const matchesFilter = filter === 'all' || item.source === filter
+      const matchesFilter =
+        filter === 'all' || item.source === filter || (filter === 'auto' && isAutoSource(item.source))
       const matchesKeyword =
         !keyword ||
         item.ip.toLowerCase().includes(keyword.toLowerCase()) ||
@@ -97,7 +105,7 @@ export function BlacklistPage() {
       total: data.length,
       manual: data.filter((i) => i.source === 'manual').length,
       external: data.filter((i) => i.source === 'external').length,
-      auto: data.filter((i) => i.source === 'auto').length,
+      auto: data.filter((i) => isAutoSource(i.source)).length,
     }
   }, [data])
 
@@ -108,8 +116,9 @@ export function BlacklistPage() {
       form.resetFields()
       setModalOpen(false)
       loadBlacklist()
-    } catch {
-      message.error('添加失败')
+    } catch (error) {
+      const err = error as { response?: { data?: { error?: { message?: string } } } }
+      message.error(err.response?.data?.error?.message || '添加失败')
     }
   }
 
@@ -331,10 +340,16 @@ export function BlacklistPage() {
         <Form form={form} layout="vertical" onFinish={handleAdd} style={{ marginTop: 16 }}>
           <Form.Item
             name="ip"
-            label="IP 地址"
-            rules={[{ required: true, message: '请输入 IP 地址' }]}
+            label="IP / 网段"
+            rules={[
+              { required: true, message: '请输入 IP 地址或网段' },
+              {
+                pattern: IP_OR_CIDR_RE,
+                message: '格式无效，支持 IPv4/IPv6 地址或 CIDR 网段（如 1.2.3.4、10.0.0.0/8）',
+              },
+            ]}
           >
-            <Input placeholder="例如：192.168.1.1" />
+            <Input placeholder="例如：192.168.1.1 或 10.0.0.0/8" />
           </Form.Item>
           <Form.Item
             name="reason"

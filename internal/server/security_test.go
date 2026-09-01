@@ -4,16 +4,29 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"lemwood_mirror/internal/config"
 )
 
-func TestSecurityMiddlewareAllowsPublicCORS(t *testing.T) {
-	t.Skip("requires initialized database and blacklist state")
-	h := SecurityMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	r := httptest.NewRequest(http.MethodGet, "https://example.test/", nil)
-	r.Header.Set("Origin", "https://evil.test")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("Access-Control-Allow-Origin = %q, want *", got)
+// CORS 策略：公共 API 通配符放行（*）；Admin 路径不暴露跨域授权，
+// 避免放大 CSRF/凭据攻击面。
+func TestSecurityMiddlewareCORSPolicy(t *testing.T) {
+	cfg := &config.Config{PowEnabled: false, AppealContact: "test-contact", AdminEnabled: false}
+	_, handler, _ := setupDownloadHandlerState(t, cfg, 0, "hello")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/stats", nil)
+	req.Header.Set("Origin", "https://example.test")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("public API Access-Control-Allow-Origin = %q, want *", got)
+	}
+
+	reqAdmin := httptest.NewRequest(http.MethodGet, "/api/v2/admin/config", nil)
+	reqAdmin.Header.Set("Origin", "https://example.test")
+	recAdmin := httptest.NewRecorder()
+	handler.ServeHTTP(recAdmin, reqAdmin)
+	if got := recAdmin.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("admin API Access-Control-Allow-Origin = %q, want empty", got)
 	}
 }
