@@ -3,7 +3,15 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getDownloadLanding } from '@/services/api'
 import { globalConfig } from '@/lib/globalConfig'
-import { Download, Home, ArrowLeft, Loader2, Heart, Users, XCircle } from 'lucide-vue-next'
+import {
+  PhDownloadSimple as Download,
+  PhHouse as Home,
+  PhArrowLeft as ArrowLeft,
+  PhCircleNotch as Loader2,
+  PhHeart as Heart,
+  PhUsers as Users,
+  PhXCircle as XCircle
+} from '@phosphor-icons/vue'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import CardHeader from '@/components/ui/CardHeader.vue'
@@ -23,7 +31,7 @@ const downloadTarget = ref('')
 const loadLandingInfo = async () => {
   const token = route.query.token
   if (!token) {
-    error.value = '缺少下载凭证'
+    error.value = '缺少下载凭证，请从来源页面重新发起下载'
     loading.value = false
     return
   }
@@ -107,26 +115,26 @@ onMounted(() => {
     <Card class="w-full max-w-lg">
       <CardHeader class="items-center text-center">
         <div class="mb-2 rounded-full bg-primary/10 p-3 text-primary">
-          <Download class="h-8 w-8" />
+          <Download weight="duotone" class="h-8 w-8" />
         </div>
         <CardTitle class="text-2xl">下载已开始</CardTitle>
         <CardDescription v-if="fileInfo?.file_name">
           正在为您下载 {{ fileInfo.file_name }}
         </CardDescription>
         <CardDescription v-else>
-          正在为您获取下载信息...
+          正在获取下载信息…
         </CardDescription>
       </CardHeader>
 
       <CardContent class="space-y-6">
         <div v-if="loading" class="flex flex-col items-center justify-center gap-3 py-8 text-muted-foreground">
-          <Loader2 class="h-8 w-8 animate-spin" />
+          <Loader2 weight="duotone" class="h-8 w-8 animate-spin" />
           <span>正在准备下载...</span>
         </div>
 
         <div v-else-if="error" class="space-y-5">
           <div class="rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-center">
-            <XCircle class="mx-auto mb-3 h-12 w-12 text-destructive" />
+            <XCircle weight="duotone" class="mx-auto mb-3 h-12 w-12 text-destructive" />
             <p class="font-medium text-foreground">下载失败</p>
             <p class="mt-1 text-sm text-muted-foreground">{{ error }}</p>
           </div>
@@ -140,24 +148,24 @@ onMounted(() => {
             :download="fileInfo.file_name || undefined"
             class="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
           >
-            <Download class="h-5 w-5" />
+            <Download weight="duotone" class="h-5 w-5" />
             开始下载
           </a>
           <p class="text-center text-sm text-muted-foreground">
-            验证已完成。Android 浏览器会拦截自动下载，<span class="font-medium text-foreground">请点击上方按钮开始下载</span>。
+            一切就绪。部分浏览器（尤其 Android）不会自动弹出下载，<span class="font-medium text-foreground">请点击上方按钮开始下载</span>。
           </p>
 
           <div class="grid gap-2 sm:grid-cols-2">
             <Button variant="outline" @click="goBack">
-              <ArrowLeft class="mr-2 h-4 w-4" />
+              <ArrowLeft weight="duotone" class="mr-2 h-4 w-4" />
               返回上一页
             </Button>
             <Button v-if="fileInfo.return_url" @click="goToWebsite">
-              <Home class="mr-2 h-4 w-4" />
+              <Home weight="duotone" class="mr-2 h-4 w-4" />
               前往网站
             </Button>
             <Button v-else @click="router.push('/')">
-              <Home class="mr-2 h-4 w-4" />
+              <Home weight="duotone" class="mr-2 h-4 w-4" />
               返回首页
             </Button>
           </div>
@@ -169,16 +177,16 @@ onMounted(() => {
     <Card class="w-full max-w-lg">
       <CardContent class="flex items-center justify-between gap-3 p-5">
         <div class="min-w-0">
-          <p class="text-sm font-semibold text-foreground">喜欢本站？请考虑赞助支持</p>
+          <p class="text-sm font-semibold text-foreground">喜欢这个项目？</p>
           <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-            您的支持会用于服务器、带宽与镜像存储等基础设施支出，收款码在关于页
+            服务器与带宽都是持续开销，你的赞助能让它跑得更久。收款码见「关于」页。
           </p>
         </div>
         <RouterLink
           to="/about"
           class="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
         >
-          <Heart class="h-4 w-4" />
+          <Heart weight="duotone" class="h-4 w-4" />
           查看收款码
         </RouterLink>
       </CardContent>
@@ -191,9 +199,9 @@ onMounted(() => {
       rel="noopener noreferrer"
       class="inline-flex items-center gap-2 rounded-lg border px-5 py-2.5 text-sm font-medium text-foreground hover:bg-muted/60"
     >
-      <Users class="h-4 w-4 text-primary" />
-      进入官方用户群
-      <span class="text-xs font-normal text-muted-foreground">柠泽资源站用户群</span>
+      <Users weight="duotone" class="h-4 w-4 text-primary" />
+      加入官方交流群
+      <span class="text-xs font-normal text-muted-foreground">获取更新通知与在线帮助</span>
     </a>
   </div>
 </template>

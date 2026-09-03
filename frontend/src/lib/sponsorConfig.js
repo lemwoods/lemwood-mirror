@@ -1,6 +1,6 @@
 export const sponsorConfig = {
   title: '赞助支持',
-  description: '您的支持会用于 Lemwood Mirror 的服务器、带宽、镜像存储和其他基础设施支出。',
+  description: '每一笔赞助都会直接用于服务器、带宽与存储开销，让镜像站持续免费开放。',
   afdianLink: '',
   alipayQrCode: new URL('@/assets/images/alipay-sponsor.jpg', import.meta.url).href,
   wechatQrCode: new URL('@/assets/images/wechat-sponsor.png', import.meta.url).href
@@ -14,6 +14,7 @@ export const sponsors = [
     currency: 'CNY',
     date: '2026-04-26',
     platform: 'wechat',
+    message: 'MobileGlues开发者',
     pinned: true
   },
   {
@@ -88,6 +89,30 @@ export const sponsors = [
     amount: 1,
     currency: 'CNY',
     date: '2026-05-02',
+    platform: 'wechat'
+  },
+  {
+    id: 11,
+    name: '@夜长梦多的小狗',
+    amount: 15,
+    currency: 'CNY',
+    date: '2026-08-31',
+    platform: 'wechat'
+  },
+  {
+    id: 12,
+    name: '@ink',
+    amount: 40,
+    currency: 'CNY',
+    date: '2026-08-31',
+    platform: 'alipay'
+  },
+  {
+    id: 13,
+    name: '@吃苦瓜加麻加辣个头啊喵喵',
+    amount: 30,
+    currency: 'CNY',
+    date: '2026-08-31',
     platform: 'wechat'
   }
 ]

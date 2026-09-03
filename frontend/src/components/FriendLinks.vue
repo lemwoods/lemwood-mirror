@@ -1,5 +1,5 @@
 <script setup>
-import { ExternalLink, Link2 } from 'lucide-vue-next'
+import { PhArrowSquareOut as ExternalLink, PhLinkSimpleHorizontal as Link2 } from '@phosphor-icons/vue'
 import Badge from '@/components/ui/Badge.vue'
 import Card from '@/components/ui/Card.vue'
 import CardHeader from '@/components/ui/CardHeader.vue'
@@ -13,7 +13,7 @@ import { friendLinksConfig } from '@/lib/friendLinksConfig'
   <Card v-if="friendLinksConfig.enabled && friendLinksConfig.links?.length" class="md:col-span-2">
     <CardHeader class="p-4 md:p-6">
       <CardTitle class="flex items-center gap-2">
-        <Link2 class="h-5 w-5 text-primary" />
+        <Link2 weight="duotone" class="h-5 w-5 text-primary" />
         {{ friendLinksConfig.title }}
       </CardTitle>
       <CardDescription v-if="friendLinksConfig.description">
@@ -41,7 +41,7 @@ import { friendLinksConfig } from '@/lib/friendLinksConfig'
                 {{ link.description }}
               </p>
             </div>
-            <ExternalLink class="mt-1 h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground" />
+            <ExternalLink weight="duotone" class="mt-1 h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground" />
           </div>
         </a>
       </div>

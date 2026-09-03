@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { Cookie } from 'lucide-vue-next'
+import { PhCookie as Cookie } from '@phosphor-icons/vue'
 import Button from '@/components/ui/Button.vue'
 import { globalConfig } from '@/lib/globalConfig'
 import { getStoredItem, setStoredItem } from '@/lib/safeStorage'
@@ -27,7 +27,7 @@ const accept = () => {
     <div class="mx-auto flex max-w-4xl flex-col gap-4 rounded-lg border bg-background p-4 shadow-lg sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-start gap-3">
         <div class="rounded-md bg-primary/10 p-2 text-primary">
-          <Cookie class="h-5 w-5" />
+          <Cookie weight="duotone" class="h-5 w-5" />
         </div>
         <div class="space-y-1 text-sm">
           <p class="font-medium text-foreground">Cookie 使用提示</p>

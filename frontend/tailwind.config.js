@@ -1,4 +1,5 @@
 const animate = require("tailwindcss-animate")
+const typography = require("@tailwindcss/typography")
 
 /** @type {import('tailwindcss').Config} */
 module.exports = {
@@ -19,6 +20,13 @@ module.exports = {
       },
     },
     extend: {
+      transitionTimingFunction: {
+        'bounce-soft': 'cubic-bezier(0.34, 1.7, 0.64, 1)'
+      },
+      fontFamily: {
+        sans: ['var(--font-sans)'],
+        mono: ['var(--font-mono)']
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
@@ -76,10 +84,23 @@ module.exports = {
         },
       },
       borderRadius: {
-        xl: "calc(var(--radius) + 4px)",
-        lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
+        none: '0',
+        sm: 'var(--radius-sm)',
+        DEFAULT: 'var(--radius-md)',
+        md: 'var(--radius-lg)',
+        lg: 'var(--radius-xl)',
+        xl: 'var(--radius-2xl)',
+        '2xl': 'var(--radius-3xl)',
+        full: 'var(--radius-full)'
+      },
+      boxShadow: {
+        sm: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
+        DEFAULT: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1)',
+        md: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1)',
+        lg: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1)',
+        xl: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
+        '2xl': '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+        inner: 'inset 0 2px 4px 0 rgba(0, 0, 0, 0.05)'
       },
       keyframes: {
         "accordion-down": {
@@ -107,5 +128,5 @@ module.exports = {
       },
     },
   },
-  plugins: [animate],
+  plugins: [animate, typography],
 }

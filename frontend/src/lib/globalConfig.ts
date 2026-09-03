@@ -4,10 +4,10 @@ export const globalConfig = {
     nameFull: '柠泽资源站状态',
     nameEn: 'Lemwood Mirror',
     version: '3.15.0',
-    description: 'Minecraft 启动器版本镜像站',
+    description: 'Minecraft 启动器与工具链的高速镜像下载服务',
     url: 'https://miawa.cn/',
     language: 'zh-CN',
-    author: 'Lemwood & QiTry'
+    author: 'Lemwood & YanSui'
   },
 
   contact: {
@@ -124,22 +124,11 @@ export const globalConfig = {
     }
   },
 
-  theme: {
-    defaultColor: 'monochrome',
-    colors: [
-      { name: '水墨', value: 'monochrome' },
-      { name: '海洋', value: 'blue' },
-      { name: '薰衣草', value: 'purple' },
-      { name: '森林', value: 'green' },
-      { name: '日落', value: 'orange' },
-      { name: '樱花', value: 'pink' }
-    ]
-  },
-
   storage: {
     keys: {
-      themeColor: 'theme-color',
       cookiesConsented: 'cookies-consented',
+      // displayMode 存三态（light/dark/system），darkMode 存实际生效值（供 StatsView 的 useDark 读取）
+      displayMode: 'display_mode',
       darkMode: 'vueuse-color-scheme',
       announcementShown: 'lemwood_announcement_shown',
       lastAnnouncementId: 'lemwood_last_announcement_id'

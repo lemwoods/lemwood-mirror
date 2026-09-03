@@ -1,7 +1,7 @@
 export const friendLinksConfig = {
   enabled: true,
   title: '友情链接',
-  description: '这里展示与 Lemwood Mirror 相关或推荐访问的朋友站点。',
+  description: '同好站点，值得一逛。',
   links: [
     {
       name: 'LogShare.CN',

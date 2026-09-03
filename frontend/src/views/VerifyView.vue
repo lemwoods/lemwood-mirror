@@ -1,7 +1,15 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { CheckCircle, Heart, Loader2, RefreshCw, ShieldCheck, Users, XCircle } from 'lucide-vue-next'
+import {
+  PhCheckCircle as CheckCircle,
+  PhHeart as Heart,
+  PhCircleNotch as Loader2,
+  PhArrowClockwise as RefreshCw,
+  PhShieldCheck as ShieldCheck,
+  PhUsers as Users,
+  PhXCircle as XCircle
+} from '@phosphor-icons/vue'
 import { getPowConfig, createDownloadChallenge, authorizeDownload } from '@/services/api'
 import { globalConfig } from '@/lib/globalConfig'
 import Button from '@/components/ui/Button.vue'
@@ -18,7 +26,7 @@ const router = useRouter()
 const filePath = ref('')
 const isLoading = ref(true)
 const progress = ref(0)
-const statusText = ref('正在获取挑战…')
+const statusText = ref('正在获取验证挑战…')
 const errorMessage = ref('')
 const verifyStatus = ref('pending') // pending | error
 
@@ -110,7 +118,7 @@ const init = async () => {
   filePath.value = route.query.file || ''
 
   if (!filePath.value) {
-    errorMessage.value = '缺少文件参数'
+    errorMessage.value = '缺少文件参数，请从来源页面重新发起下载'
     verifyStatus.value = 'error'
     isLoading.value = false
     return
@@ -118,7 +126,7 @@ const init = async () => {
 
   if (!isPowSupported()) {
     errorMessage.value =
-      '当前浏览器环境不支持 Web Crypto（需要 HTTPS 连接与较新的浏览器内核），无法自动完成人机验证。您可以升级浏览器，或使用下方"绕过验证直接下载"。'
+      '当前浏览器不支持 Web Crypto（需要较新的内核与 HTTPS 环境），无法自动完成验证。可升级浏览器，或使用下方备用下载入口。'
     verifyStatus.value = 'error'
     isLoading.value = false
     return
@@ -133,7 +141,7 @@ const init = async () => {
     }
 
     // 2. 创建挑战
-    statusText.value = '正在获取挑战…'
+    statusText.value = '正在获取验证挑战…'
     const chRes = await createDownloadChallenge(filePath.value)
     const challenge = chRes.data
     if (!challenge || !challenge.parameters) {
@@ -141,7 +149,7 @@ const init = async () => {
     }
 
     // 3. 浏览器求解 PoW
-    statusText.value = '正在计算工作量证明…'
+    statusText.value = '正在后台完成计算，请稍候…'
     const solution = await solve(challenge.parameters, (pct) => {
       progress.value = pct
     })
@@ -150,13 +158,13 @@ const init = async () => {
     }
 
     // 4. 提交授权
-    statusText.value = '正在领取下载授权…'
+    statusText.value = '正在领取下载凭证…'
     const authRes = await authorizeDownload(challenge, solution)
     const token = authRes.data.download_token
     if (token) {
       // 显示“验证成功”，短暂停留再跳转，避免用户误以为验证未完成就出现下载页
       verifyStatus.value = 'success'
-      statusText.value = '验证成功，正在跳转下载…'
+      statusText.value = '验证通过，即将开始下载…'
       progress.value = 100
       await new Promise((r) => setTimeout(r, 500))
       const returnUrl = route.query.return_url
@@ -196,10 +204,10 @@ onUnmounted(() => {
     <Card class="w-full max-w-lg">
       <CardHeader class="items-center text-center">
         <div class="mb-2 rounded-full bg-primary/10 p-3 text-primary">
-          <ShieldCheck class="h-8 w-8" />
+          <ShieldCheck weight="duotone" class="h-8 w-8" />
         </div>
-        <CardTitle class="text-2xl">下载验证</CardTitle>
-        <CardDescription>请稍候，正在自动完成验证</CardDescription>
+        <CardTitle class="text-2xl">安全验证</CardTitle>
+        <CardDescription>正在确认你是真实访客，无需任何操作</CardDescription>
       </CardHeader>
 
       <CardContent class="space-y-6">
@@ -207,7 +215,7 @@ onUnmounted(() => {
           v-if="isLoading && verifyStatus !== 'error'"
           class="flex flex-col items-center justify-center gap-4 rounded-lg border border-dashed px-6 py-12 text-muted-foreground"
         >
-          <Loader2 class="h-8 w-8 animate-spin text-primary" />
+          <Loader2 weight="duotone" class="h-8 w-8 animate-spin text-primary" />
           <span class="text-sm">{{ statusText }}</span>
           <div class="h-2 w-full max-w-xs overflow-hidden rounded-full bg-muted">
             <div
@@ -222,29 +230,29 @@ onUnmounted(() => {
           v-else-if="verifyStatus === 'success'"
           class="flex flex-col items-center justify-center gap-4 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-6 py-12 text-muted-foreground"
         >
-          <CheckCircle class="h-10 w-10 text-emerald-500" />
+          <CheckCircle weight="duotone" class="h-10 w-10 text-emerald-500" />
           <span class="font-medium text-foreground">验证成功</span>
           <span class="text-sm">{{ statusText }}</span>
         </div>
 
         <div v-else-if="verifyStatus === 'error'" class="space-y-5">
           <div class="rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-center">
-            <XCircle class="mx-auto mb-3 h-12 w-12 text-destructive" />
+            <XCircle weight="duotone" class="mx-auto mb-3 h-12 w-12 text-destructive" />
             <p class="font-medium text-foreground">验证失败</p>
             <p class="mt-1 text-sm text-muted-foreground">{{ errorMessage }}</p>
           </div>
           <Button class="w-full" @click="retry">
-            <RefreshCw class="mr-2 h-4 w-4" />
+            <RefreshCw weight="duotone" class="mr-2 h-4 w-4" />
             重新验证
           </Button>
           <Button v-if="filePath" variant="outline" class="w-full" @click="directDownload">
-            绕过验证直接下载
+            验证遇到问题？直接下载
           </Button>
         </div>
       </CardContent>
 
       <CardFooter v-if="filePath" class="border-t text-xs text-muted-foreground">
-        <span class="break-all">文件：{{ filePath.split('/').pop() }}</span>
+        <span class="break-all">目标文件：{{ filePath.split('/').pop() }}</span>
       </CardFooter>
     </Card>
 
@@ -261,7 +269,7 @@ onUnmounted(() => {
           to="/about"
           class="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
         >
-          <Heart class="h-4 w-4" />
+          <Heart weight="duotone" class="h-4 w-4" />
           查看收款码
         </RouterLink>
       </CardContent>
@@ -274,7 +282,7 @@ onUnmounted(() => {
       rel="noopener noreferrer"
       class="inline-flex items-center gap-2 rounded-lg border px-5 py-2.5 text-sm font-medium text-foreground hover:bg-muted/60"
     >
-      <Users class="h-4 w-4 text-primary" />
+      <Users weight="duotone" class="h-4 w-4 text-primary" />
       进入官方用户群
       <span class="text-xs font-normal text-muted-foreground">柠泽资源站用户群</span>
     </a>

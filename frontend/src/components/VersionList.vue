@@ -1,70 +1,45 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Download, History, List, Package } from 'lucide-vue-next'
-import { getStatus, getLatest, getPowConfig, prepareDownload } from '@/services/api'
+import { PhFolder as Folder, PhPackage as Package } from '@phosphor-icons/vue'
+import { getStatus } from '@/services/api'
 import { globalConfig } from '@/lib/globalConfig'
-import { openBlankTab } from '@/lib/safeStorage'
 import Card from '@/components/ui/Card.vue'
-import Button from '@/components/ui/Button.vue'
-import Badge from '@/components/ui/Badge.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 
 const router = useRouter()
 const launcherDefaultLogo = globalConfig.launchers.fcl?.logoUrl
 
 const rawLaunchers = ref({})
-const latestMap = ref({})
 const loading = ref(true)
-const powConfig = ref({ enabled: false })
 
 const launcherList = computed(() => {
-	  const list = Object.keys(rawLaunchers.value)
-	    .filter((name) => name !== 'authlib-injector')
-	    .map((name) => {
-    const versions = rawLaunchers.value[name]
-    const latestVersion = latestMap.value[name]
-    const latestObj = versions.find((v) => (v.tag_name || v.name) === latestVersion) || versions[0]
-    const info = globalConfig.launchers[name] || { displayName: name }
+  const list = Object.keys(rawLaunchers.value)
+    .filter((name) => name !== 'authlib-injector')
+    .map((name) => {
+      const versions = rawLaunchers.value[name]
+      const info = globalConfig.launchers[name] || { displayName: name }
 
-    const latestDownloadUrl = latestObj?.assets?.length
-      ? getAssetUrl(name, latestObj, latestObj.assets[0])
-      : '#'
-
-    return {
-      name,
-      displayName: info.displayName,
-      logoUrl: info.logoUrl || launcherDefaultLogo,
-      isPluginList: Boolean(info.isPluginList),
-      versions,
-      latest: latestVersion,
-      lastUpdated: versions.length ? versions[0].published_at : null,
-      hasAssets: Boolean(latestObj?.assets?.length),
-      latestObj,
-      latestDownloadUrl
-    }
-  })
-  // 插件列表卡片置顶，其余保持原有顺序
-  return list.sort((a, b) => Number(b.isPluginList) - Number(a.isPluginList))
+      return {
+        name,
+        displayName: info.displayName,
+        logoUrl: info.logoUrl || launcherDefaultLogo,
+        versions,
+        lastUpdated: versions.length ? versions[0].published_at : null
+      }
+    })
+  return list
 })
 
 const loadData = async () => {
   loading.value = true
   try {
-    const [statusRes, latestRes, powRes] = await Promise.all([
-      getStatus(),
-      getLatest(),
-      getPowConfig().catch(() => ({ data: { enabled: false } }))
-    ])
-
+    const statusRes = await getStatus()
     const data = statusRes.data
     for (const key in data) {
       data[key].sort((a, b) => String(b.tag_name || b.name).localeCompare(String(a.tag_name || a.name)))
     }
-
     rawLaunchers.value = data
-    latestMap.value = latestRes.data
-    powConfig.value = powRes.data
   } catch (error) {
     console.error(error)
   } finally {
@@ -74,49 +49,16 @@ const loadData = async () => {
 
 const formatDate = (dateStr) => {
   if (!dateStr) return '未知时间'
-  return new Date(dateStr).toLocaleDateString()
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return '未知时间'
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-const getAssetUrl = (launcherName, version, asset) => {
-  if (asset.url && (asset.url.startsWith('http://') || asset.url.startsWith('https://'))) {
-    return asset.url
-  }
-  return `/download/${launcherName}/${version.tag_name || version.name}/${asset.name}`
-}
+// 版本文件夹格子：只展示最新两个版本
+const recentVersions = (item) => (item.versions || []).slice(0, 2)
 
-const getAssetPath = (launcherName, version, asset) => {
-  return `${launcherName}/${version.tag_name || version.name}/${asset.name}`
-}
-
-const handleDownload = async (item) => {
-  if (!item.hasAssets || !item.latestObj) return
-
-  const asset = item.latestObj.assets[0]
-  const filePath = getAssetPath(item.name, item.latestObj, asset)
-  const returnUrl = window.location.href
-  const source = globalConfig.download.sourceLabels.home
-
-  if (!powConfig.value.enabled) {
-    // 点击同步栈内先开占位窗口，避免 await 后 window.open 被弹窗拦截
-    const tab = openBlankTab()
-    try {
-      const response = await prepareDownload(filePath, returnUrl, source)
-      const token = response.data.download_token
-      if (token) {
-        tab?.close()
-        router.push(`/download-started?token=${token}`)
-      } else {
-        tab?.navigate(response.data.download_url || item.latestDownloadUrl)
-      }
-    } catch (error) {
-      console.error('Prepare download error:', error)
-      tab?.navigate(item.latestDownloadUrl)
-    }
-    return
-  }
-
-  router.push(`/verify?file=${encodeURIComponent(filePath)}&return_url=${encodeURIComponent(returnUrl)}&source=${encodeURIComponent(source)}`)
-}
+const formatVersionLabel = (v) => v.tag_name || v.name || ''
 
 onMounted(() => {
   loadData()
@@ -129,89 +71,72 @@ defineExpose({ refresh: loadData })
   <div class="space-y-6">
     <div class="flex flex-col gap-2">
       <h2 class="text-3xl font-bold tracking-tight">版本探索</h2>
-      <p class="text-muted-foreground">浏览最新启动器版本，快速下载或查看历史构建。</p>
+      <p class="text-muted-foreground">实时同步上游发布，点开版本文件夹即可获取文件。</p>
     </div>
 
-    <div v-if="loading && !launcherList.length" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    <div v-if="loading && !launcherList.length" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
       <Card v-for="i in 4" :key="i">
         <div class="flex items-start gap-4 p-4">
-          <Skeleton class="h-12 w-12 shrink-0 rounded-lg" />
+          <Skeleton class="h-14 w-14 shrink-0 rounded-xl" />
           <div class="min-w-0 flex-1 space-y-2">
             <Skeleton class="h-5 w-3/4" />
             <Skeleton class="h-4 w-1/2" />
           </div>
         </div>
-        <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <Skeleton class="h-8 w-28" />
-          <Skeleton class="h-8 w-24" />
+        <div class="px-4 pb-4">
+          <div class="rounded-lg bg-muted/50 p-3">
+            <Skeleton class="mb-2 h-3 w-16" />
+            <div class="grid grid-cols-2 gap-2">
+              <Skeleton class="h-9" />
+              <Skeleton class="h-9" />
+            </div>
+          </div>
         </div>
       </Card>
     </div>
 
     <div v-else-if="!launcherList.length" class="rounded-lg border border-dashed p-12 text-center text-muted-foreground">
-      <Package class="mx-auto mb-4 h-12 w-12 opacity-40" />
-      <p class="font-medium text-foreground">暂无数据</p>
-      <p class="mt-1 text-sm">稍后再试，或检查接口连接。</p>
+      <Package weight="duotone" class="mx-auto mb-4 h-12 w-12 opacity-40" />
+      <p class="font-medium text-foreground">暂时没有可展示的内容</p>
+      <p class="mt-1 text-sm">服务可能正在同步数据，稍候刷新即可。</p>
     </div>
 
-    <div v-else class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    <div v-else class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
       <Card
         v-for="item in launcherList"
         :key="item.name"
         class="transition-shadow hover:shadow-md"
       >
-        <div class="flex items-start gap-4 p-4">
+        <!-- 头部：logo + 名称/最近更新 -->
+        <div class="flex items-start gap-4 p-4 pb-3">
           <img
             :src="item.logoUrl"
-            class="h-12 w-12 shrink-0 rounded-lg border bg-background object-contain p-1.5 shadow-sm"
+            class="h-14 w-14 shrink-0 rounded-xl border bg-background object-contain p-1.5 shadow-sm"
             :alt="item.displayName"
           />
-          <div class="min-w-0 flex-1 space-y-1.5">
-            <div class="flex items-center gap-2">
-              <span class="truncate text-base font-semibold text-foreground">{{ item.displayName }}</span>
-              <span v-if="item.latest" class="shrink-0 text-xs text-muted-foreground">
-                {{ item.latest }}
-              </span>
-            </div>
+          <div class="min-w-0 flex-1 space-y-1 self-center">
+            <h3 class="truncate text-lg font-bold leading-tight text-foreground">{{ item.displayName }}</h3>
             <p class="text-sm text-muted-foreground">最近更新：{{ formatDate(item.lastUpdated) }}</p>
           </div>
         </div>
-        <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <template v-if="item.isPluginList">
-            <Button
-              size="sm"
-              @click="$router.push(`/files/${item.name}`)"
-            >
-              <List class="mr-1.5 h-3.5 w-3.5" />
-              浏览插件列表
-            </Button>
-          </template>
-          <template v-else>
-            <Button
-              v-if="item.hasAssets"
-              size="sm"
-              @click="handleDownload(item)"
-            >
-              <Download class="mr-1.5 h-3.5 w-3.5" />
-              下载最新版
-            </Button>
-            <Button
-              v-else
-              size="sm"
-              disabled
-            >
-              <Download class="mr-1.5 h-3.5 w-3.5" />
-              暂无资源
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              @click="$router.push(`/files/${item.name}`)"
-            >
-              <History class="mr-1.5 h-3.5 w-3.5" />
-              历史版本
-            </Button>
-          </template>
+
+        <!-- 版本文件夹：内嵌浅底区块，格子直达对应版本文件列表 -->
+        <div class="px-4 pb-4">
+          <div class="rounded-lg bg-muted/50 p-3">
+            <p class="mb-2 text-xs font-medium text-muted-foreground">版本文件夹</p>
+            <div class="grid grid-cols-2 gap-2">
+              <button
+                v-for="v in recentVersions(item)"
+                :key="formatVersionLabel(v)"
+                type="button"
+                class="flex min-w-0 items-center gap-2 rounded-md border bg-background px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+                @click="$router.push(`/files/${item.name}/${formatVersionLabel(v)}`)"
+              >
+                <Folder weight="duotone" class="h-4 w-4 shrink-0 text-primary" />
+                <span class="truncate">{{ formatVersionLabel(v) }}</span>
+              </button>
+            </div>
+          </div>
         </div>
       </Card>
     </div>

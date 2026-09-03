@@ -46,8 +46,9 @@ const router = createRouter({
       meta: { title: T('统计信息') }
     },
     {
-      path: '/api',
-      name: 'api',
+      // 不能用 /api：dev/preview 的 vite 代理把 /api/* 转发到线上后端，SPA 路由会被劫持
+      path: '/apidocs',
+      name: 'apidocs',
       component: () => import('@/views/ApiDocsView.vue'),
       meta: { title: T('API 文档') }
     },

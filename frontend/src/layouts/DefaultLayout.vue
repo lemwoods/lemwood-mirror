@@ -1,174 +1,165 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { Moon, Palette, Sun, X } from 'lucide-vue-next'
+import {
+  PhSun as Sun,
+  PhMoon as Moon,
+  PhMonitor as Monitor
+} from '@phosphor-icons/vue'
 import Footer from '@/components/layout/Footer.vue'
 import MobileNav from '@/components/layout/MobileNav.vue'
-import Button from '@/components/ui/Button.vue'
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle
-} from '@/components/ui/sheet'
-import { cn } from '@/lib/utils'
 import { isNavigationActive, navigationLinks } from '@/lib/navigation'
 import { globalConfig } from '@/lib/globalConfig'
-import { getStoredItem, setStoredItem, removeStoredItem } from '@/lib/safeStorage'
+import { setStoredItem, getStoredItem } from '@/lib/safeStorage'
 
 const route = useRoute()
 
-const { themeColor, darkMode } = globalConfig.storage.keys
+const { displayMode: displayModeKey, darkMode } = globalConfig.storage.keys
 
-const isDark = ref(false)
-const isThemePanelOpen = ref(false)
-
-const setDark = (val) => {
-  isDark.value = val
-  document.documentElement.classList.toggle('dark', val)
-  setStoredItem(darkMode, val ? 'dark' : 'light')
+// 顶栏滚动后切换为毛玻璃胶囊（对齐 LogShare.CN 顶栏行为）
+const isScrolled = ref(false)
+const onWindowScroll = () => {
+  isScrolled.value = window.scrollY > 8
 }
 
-const toggleDark = () => setDark(!isDark.value)
+// 显示模式：浅色 / 深色 / 跟随系统（顶栏三态胶囊切换）
+const displayMode = ref('system')
 
-const colorOptions = globalConfig.theme.colors.map(c => ({
-  name: c.name,
-  value: c.value,
-  color: ({
-    monochrome: 'bg-zinc-500',
-    blue: 'bg-blue-500',
-    purple: 'bg-purple-500',
-    green: 'bg-green-500',
-    orange: 'bg-orange-500',
-    pink: 'bg-pink-500'
-  })[c.value] || 'bg-zinc-500'
-}))
+const themeOptions = [
+  { mode: 'light', icon: Sun, label: '浅色' },
+  { mode: 'dark', icon: Moon, label: '深色' },
+  { mode: 'system', icon: Monitor, label: '跟随系统' }
+]
 
-const selectedColor = ref(getStoredItem(themeColor) || globalConfig.theme.defaultColor)
-
-const applyThemeColor = (color) => {
-  selectedColor.value = color
-  setStoredItem(themeColor, color)
-  document.documentElement.setAttribute('data-theme-color', color)
-}
-
-const resetThemeSettings = () => {
-  removeStoredItem(themeColor)
-  removeStoredItem(darkMode)
-  document.documentElement.removeAttribute('data-theme-color')
-  selectedColor.value = globalConfig.theme.defaultColor
+const applyDisplayMode = mode => {
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-  setDark(prefersDark)
+  const dark = mode === 'dark' || (mode === 'system' && prefersDark)
+  document.documentElement.classList.toggle('dark', dark)
+  setStoredItem(darkMode, dark ? 'dark' : 'light')
+}
+
+const setDisplayMode = mode => {
+  displayMode.value = mode
+  // 持久化三态值；'system' 表示跟随系统
+  setStoredItem(displayModeKey, mode)
+  applyDisplayMode(mode)
 }
 
 onMounted(() => {
-  const stored = getStoredItem(darkMode)
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-  setDark(stored === 'dark' || (!stored && prefersDark))
+  const stored = getStoredItem(displayModeKey)
+  displayMode.value = stored === 'dark' || stored === 'light' ? stored : 'system'
+  applyDisplayMode(displayMode.value)
+
+  // 未显式设置显示模式时，跟随系统深浅色变化
+  const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+  mediaQuery.addEventListener('change', () => {
+    applyDisplayMode(displayMode.value)
+  })
+
+  onWindowScroll()
+  window.addEventListener('scroll', onWindowScroll, { passive: true })
 })
 
-applyThemeColor(selectedColor.value)
+onUnmounted(() => {
+  window.removeEventListener('scroll', onWindowScroll)
+})
 </script>
 
 <template>
-  <div class="min-h-screen bg-background">
-    <div class="flex min-h-screen flex-col">
-      <header class="sticky top-3 z-30 mx-auto w-[calc(100%-2rem)] max-w-6xl rounded-xl border bg-background/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div class="flex h-14 items-center gap-2 px-3 lg:h-[60px] lg:gap-3 lg:px-5">
+  <div
+    class="flex min-h-screen flex-col bg-background font-sans text-foreground antialiased transition-colors duration-500"
+  >
+    <header class="pointer-events-none sticky top-0 z-30 w-full">
+      <div
+        class="pointer-events-auto mx-auto transition-all duration-300 ease-out"
+        :class="
+          isScrolled
+            ? 'mt-3 w-[calc(100%-2rem)] rounded-full border-border/60 bg-background/80 shadow-lg backdrop-blur-md'
+            : 'mt-0 w-full rounded-none border border-transparent bg-background'
+        "
+      >
+        <div
+          class="flex items-center gap-3 px-4 transition-all duration-300"
+          :class="isScrolled ? 'h-12' : 'h-14'"
+        >
           <router-link to="/" class="flex shrink-0 items-center gap-2 font-semibold">
-            <img src="/favicon.jpg" alt="Logo" class="h-7 w-7 rounded border object-cover" />
+            <img
+              src="@/assets/logo.svg"
+              alt="Logo"
+              class="h-7 w-7 dark:hidden"
+            />
+            <img
+              src="@/assets/logo-dark.svg"
+              alt="Logo"
+              class="hidden h-7 w-7 dark:block"
+            />
             <span class="inline">{{ globalConfig.site.name }}</span>
           </router-link>
 
-          <nav class="ml-4 hidden items-center gap-0.5 md:flex">
+          <nav class="ml-4 hidden items-center gap-1 md:flex">
             <router-link
               v-for="link in navigationLinks"
               :key="link.path"
               :to="link.path"
-              :class="cn(
-                'rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground',
+              class="rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
+              :class="
                 isNavigationActive(route.path, link)
                   ? 'bg-accent text-accent-foreground'
                   : 'text-muted-foreground'
-              )"
+              "
             >
+              <component
+                :is="link.icon"
+                weight="duotone"
+                class="mr-1 -mt-0.5 inline h-4 w-4"
+              />
               {{ link.name }}
             </router-link>
           </nav>
 
           <div class="flex-1" />
 
-          <Button variant="ghost" size="icon" class="h-8 w-8" @click="toggleDark()">
-            <Sun v-if="!isDark" class="h-4 w-4" />
-            <Moon v-else class="h-4 w-4" />
-            <span class="sr-only">切换深浅色</span>
-          </Button>
-          <Button variant="ghost" size="icon" class="h-8 w-8" @click="isThemePanelOpen = true">
-            <Palette class="h-4 w-4" />
-            <span class="sr-only">主题设置</span>
-          </Button>
-          <MobileNav />
-        </div>
-      </header>
-
-      <main class="mx-auto flex w-[calc(100%-2rem)] max-w-6xl flex-1 flex-col gap-6 pt-6 lg:pt-8">
-        <slot />
-      </main>
-      <Footer />
-    </div>
-  </div>
-
-  <Sheet v-model:open="isThemePanelOpen">
-    <SheetContent side="right" class="w-[320px] overflow-y-auto sm:w-[420px]">
-      <SheetHeader class="text-left">
-        <SheetTitle class="flex items-center gap-2">
-          <Palette class="h-5 w-5" />
-          主题设置
-        </SheetTitle>
-        <SheetDescription>调整主题色和深浅色模式。</SheetDescription>
-      </SheetHeader>
-
-      <div class="mt-6 space-y-6">
-        <section class="space-y-3">
-          <h4 class="text-sm font-medium">主题色</h4>
-          <div class="grid grid-cols-2 gap-2">
+          <!-- 主题三态切换：圆角容器 tab，高亮胶囊在选项间平移 -->
+          <div
+            class="relative flex items-center gap-0.5 rounded-full border border-border/60 bg-background/60 p-0.5"
+            role="tablist"
+            aria-label="显示模式"
+          >
+            <span
+              aria-hidden="true"
+              class="absolute left-0.5 top-1/2 h-7 w-7 -translate-y-1/2 rounded-full bg-muted-foreground/25 shadow-sm transition-transform duration-300 ease-out"
+              :style="{
+                transform: `translateX(${themeOptions.findIndex(o => o.mode === displayMode) * 30}px) translateY(-50%)`
+              }"
+            />
             <button
-              v-for="option in colorOptions"
-              :key="option.value"
-              type="button"
-              :class="cn(
-                'flex items-center gap-3 rounded-md border px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground',
-                selectedColor === option.value ? 'border-primary bg-accent text-accent-foreground' : 'bg-background'
-              )"
-              @click="applyThemeColor(option.value)"
+              v-for="option in themeOptions"
+              :key="option.mode"
+              role="tab"
+              :aria-selected="displayMode === option.mode"
+              :aria-label="option.label"
+              :title="option.label"
+              class="relative z-10 inline-flex h-7 w-7 items-center justify-center rounded-full transition-colors"
+              :class="
+                displayMode === option.mode
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:text-accent-foreground'
+              "
+              @click="setDisplayMode(option.mode)"
             >
-              <span class="h-4 w-4 rounded-full" :class="option.color"></span>
-              {{ option.name }}
+              <component :is="option.icon" weight="duotone" class="h-3.5 w-3.5" />
             </button>
           </div>
-        </section>
 
-        <section class="space-y-3">
-          <h4 class="text-sm font-medium">显示模式</h4>
-          <div class="grid grid-cols-2 gap-2">
-            <Button variant="outline" :class="!isDark ? 'bg-accent' : ''" @click="setDark(false)">
-              <Sun class="mr-2 h-4 w-4" />
-              浅色
-            </Button>
-            <Button variant="outline" :class="isDark ? 'bg-accent' : ''" @click="setDark(true)">
-              <Moon class="mr-2 h-4 w-4" />
-              深色
-            </Button>
-          </div>
-        </section>
-
-        <div class="border-t pt-4">
-          <Button variant="outline" class="w-full" @click="resetThemeSettings">
-            重置主题设置
-          </Button>
+          <MobileNav :scrolled="isScrolled" />
         </div>
       </div>
-    </SheetContent>
-  </Sheet>
+    </header>
+
+    <!-- [&>*]:min-w-0：flex 子项默认 min-width:auto，长内容（如文档代码块）会把页面撑出横向滚动 -->
+    <main class="mx-auto flex w-[calc(100%-2rem)] max-w-6xl flex-1 flex-col gap-6 pt-6 lg:pt-8 [&>*]:min-w-0">
+      <slot />
+    </main>
+    <Footer />
+  </div>
 </template>
