@@ -412,6 +412,8 @@ type DownloadRank struct {
 	Count    int64  `json:"count"`
 }
 
+// GeoStat 保持旧版 API 响应形状不变：country 字段在国内条目上承载省份名（台湾视同省份），
+// 海外与未知来源分别聚合为「海外」「其他」两个合成条目。
 type GeoStat struct {
 	Country string `json:"country"`
 	Count   int64  `json:"count"`
@@ -832,12 +834,16 @@ func queryTopDownloads(data *StatsData) {
 	data.TopDownloads = converted
 }
 
+// queryGeoDistribution 统计国内省份访问分布：国内聚合 country 为 中国/China 以及
+// 含「台湾」的记录（台湾视同国内省份），按 visits.region（ip2region 省份段）分组，
+// region 为空的台湾记录兜底为「台湾」条目；海外国家合并为「海外」，
+// Local/空白国家/无省份的未知来源合并为「其他」。响应字段沿用旧版 geo_distribution 形状。
 func queryGeoDistribution(data *StatsData) {
 	rows, err := db.DB.Query(db.Rebind(`
-		SELECT country, COALESCE(SUM(visit_count), 0) as c
+		SELECT region, COALESCE(SUM(visit_count), 0) as c
 		FROM visits
-		WHERE country != '' AND country != 'Local'
-		GROUP BY country
+		WHERE (country IN ('中国', 'China') OR country LIKE '%台湾%') AND region != ''
+		GROUP BY region
 		ORDER BY c DESC
 		LIMIT 50`))
 	if err != nil {
@@ -847,12 +853,42 @@ func queryGeoDistribution(data *StatsData) {
 
 	var geos []GeoStat
 	for rows.Next() {
-		var g GeoStat
-		if err := rows.Scan(&g.Country, &g.Count); err != nil {
+		var name string
+		var count int64
+		if err := rows.Scan(&name, &count); err != nil {
 			continue
 		}
-		geos = append(geos, g)
+		geos = append(geos, GeoStat{Country: name, Count: count})
 	}
+
+	scanSum := func(query string) int64 {
+		var total int64
+		if err := db.DB.QueryRow(db.Rebind(query)).Scan(&total); err != nil {
+			return 0
+		}
+		return total
+	}
+	if tw := scanSum(`
+		SELECT COALESCE(SUM(visit_count), 0)
+		FROM visits
+		WHERE country LIKE '%台湾%' AND (region = '' OR region IS NULL)`); tw > 0 {
+		geos = append(geos, GeoStat{Country: "台湾", Count: tw})
+	}
+	if overseas := scanSum(`
+		SELECT COALESCE(SUM(visit_count), 0)
+		FROM visits
+		WHERE country != '' AND country != 'Local' AND country != '中国' AND country != 'China'
+		  AND country NOT LIKE '%台湾%'`); overseas > 0 {
+		geos = append(geos, GeoStat{Country: "海外", Count: overseas})
+	}
+	if unknown := scanSum(`
+		SELECT COALESCE(SUM(visit_count), 0)
+		FROM visits
+		WHERE country = '' OR country = 'Local' OR ((country = '中国' OR country = 'China') AND region = '')`); unknown > 0 {
+		geos = append(geos, GeoStat{Country: "其他", Count: unknown})
+	}
+
+	sort.Slice(geos, func(i, j int) bool { return geos[i].Count > geos[j].Count })
 	data.GeoDistribution = geos
 }
 

@@ -96,6 +96,11 @@ const downloadGrowth = computed(() => {
   return ((recent - avg) / avg * 100)
 })
 
+// 覆盖省份数：剔除「海外」「其他」聚合项
+const provinceCount = computed(() => {
+  return (stats.value.geo_distribution || []).filter(g => g.country !== '海外' && g.country !== '其他').length
+})
+
 // 热门资源排行：只取 Top5（与左侧地图卡高度对齐），launcher key → 显示名 + logo，并算出占比条数据
 const topDownloads = computed(() => {
   const ranks = (stats.value.top_downloads || []).slice(0, 6)
@@ -125,7 +130,8 @@ const crownPaths = [
   'M6 16.5 L12 6.5 L18 16.5 Q12 18.4 6 16.5 Z M5.6 18.6 Q12 20.2 18.4 18.6 L18.4 19.8 Q12 21.4 5.6 19.8 Z'
 ]
 
-// 全球访问分布：矩形树图（面积 = 访问量），低占比国家聚合为「其他」
+// 国内访问分布：矩形树图（面积 = 访问量）。国内按省份展示，后端已把海外/未知来源
+// 合并为「海外」「其他」；占比 < 2% 的省份并入「其他」，避免碎块过多
 const treemapOption = computed(() => {
   const textColor = isDark.value ? '#a1a1aa' : '#52525b'
   const gapColor = isDark.value ? '#18181b' : '#ffffff'
@@ -133,12 +139,12 @@ const treemapOption = computed(() => {
   const geo = [...(stats.value.geo_distribution || [])].sort((a, b) => (b.count || 0) - (a.count || 0))
   const total = geo.reduce((s, g) => s + (g.count || 0), 0) || 1
 
-  // 占比 < 2% 的国家聚合，避免碎块过多
   const main = []
   let restCount = 0
   for (const g of geo) {
-    if ((g.count || 0) / total >= 0.02) main.push(g)
-    else restCount += g.count || 0
+    if (g.country === '其他') { restCount += g.count || 0; continue }
+    if (g.country === '海外' || (g.count || 0) / total >= 0.02) { main.push(g); continue }
+    restCount += g.count || 0
   }
   const data = main.map(g => ({
     name: g.country,
@@ -482,9 +488,9 @@ onUnmounted(() => {
               <p class="mt-1 text-xs text-muted-foreground">近 30 日 {{ formatBytes(stats.last_30_traffic_bytes) }}</p>
             </div>
             <div>
-              <p class="text-xs text-muted-foreground">覆盖地区</p>
-              <p class="text-2xl font-bold">{{ stats.geo_distribution?.length || '-' }}</p>
-              <p class="mt-1 text-xs text-muted-foreground">国家/地区</p>
+              <p class="text-xs text-muted-foreground">覆盖省份</p>
+              <p class="text-2xl font-bold">{{ provinceCount || '-' }}</p>
+              <p class="mt-1 text-xs text-muted-foreground">省级行政区</p>
             </div>
             <div>
               <p class="text-xs text-muted-foreground">磁盘占用</p>
@@ -575,9 +581,9 @@ onUnmounted(() => {
           <CardHeader>
             <CardTitle class="flex items-center gap-2 text-base">
               <MapPin weight="duotone" class="h-4 w-4 text-primary" />
-              全球访问分布
+              国内访问分布
             </CardTitle>
-            <CardDescription>按访问来源国家/地区统计，面积越大代表访问越多。</CardDescription>
+            <CardDescription>按国内访问来源省份统计，海外与未知来源合并为「海外/其他」展示，面积越大代表访问越多。</CardDescription>
           </CardHeader>
           <CardContent class="pl-2">
             <div class="h-[350px] w-full">
