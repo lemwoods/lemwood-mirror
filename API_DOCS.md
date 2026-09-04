@@ -321,7 +321,7 @@ GET /api/v2/stats
   ],
   "geo_distribution": [
     {
-      "country": "China",
+      "country": "广东省",
       "count": 300
     }
   ],
@@ -354,8 +354,8 @@ GET /api/v2/stats
 | `top_downloads` | array | 普通下载排行 Top 10，按启动器聚合，下载次数降序 |
 | `top_downloads[].launcher` | string | 启动器标识 |
 | `top_downloads[].count` | int | 下载次数 |
-| `geo_distribution` | array | 地区分布 Top 50，按访问量降序，排除本地和空白记录 |
-| `geo_distribution[].country` | string | 国家/地区名 |
+| `geo_distribution` | array | 国内省份访问分布 Top 50 + 海外/未知聚合项，按访问量降序（台湾视同国内省份） |
+| `geo_distribution[].country` | string | 国内条目为省份名（含台湾）；海外与未知来源分别聚合为「海外」「其他」 |
 | `geo_distribution[].count` | int | 访问次数 |
 | `daily_stats` | array | 最近 30 天每日统计 |
 | `daily_stats[].date` | string | 日期（`YYYY-MM-DD`） |

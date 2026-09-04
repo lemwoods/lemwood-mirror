@@ -1470,11 +1470,16 @@ components:
 
     GeoStat:
       type: object
-      description: Geographic distribution entry.
+      description: >-
+        Domestic province distribution entry. The wire shape is unchanged from the
+        legacy country-based format: `country` carries a province name for domestic
+        entries (Taiwan is treated as a domestic province), while overseas and
+        unknown origins are aggregated into single
+        "海外" and "其他" entries respectively.
       properties:
         country:
           type: string
-          example: China
+          example: 广东省
         count:
           type: integer
           format: int64
@@ -1559,7 +1564,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/GeoStat'
-          description: Top 50 geographic distribution entries (excluding local/blank)
+          description: Top 50 domestic province distribution entries plus aggregated "海外"/"其他" entries, ranked by visit count
         daily_stats:
           type: array
           items:

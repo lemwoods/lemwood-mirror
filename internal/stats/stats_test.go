@@ -264,3 +264,46 @@ func TestDaysSinceClamp(t *testing.T) {
 		t.Fatalf("daysSince(-2d) = %d, want 3", d)
 	}
 }
+
+// TestQueryGeoDistribution 国内省份聚合 + 海外/未知分别聚合为「海外」「其他」，
+// 响应沿用旧版 geo_distribution 形状（country 字段承载省份名）。
+func TestQueryGeoDistribution(t *testing.T) {
+	setupStatsTestDB(t)
+
+	if _, err := db.DB.Exec(`INSERT INTO visits (ip, path, country, region, visit_count) VALUES
+		('', '/', '中国', '广东省', 3),
+		('', '/', '中国', '浙江省', 1),
+		('', '/', 'China', '山东省', 1),
+		('', '/', '中国', '', 2),
+		('', '/', '美国', '', 2),
+		('', '/', '', '', 1),
+		('', '/', 'Local', '内网', 1),
+		('', '/', '台湾', '', 5),
+		('', '/', '中国台湾', '台湾省', 2)`); err != nil {
+		t.Fatalf("insert visits error = %v", err)
+	}
+
+	data := &StatsData{}
+	queryGeoDistribution(data)
+
+	if len(data.GeoDistribution) != 7 {
+		t.Fatalf("GeoDistribution = %+v, want 7 entries", data.GeoDistribution)
+	}
+
+	// 排序按访问量降序：台湾(5) > 其他(4) > 广东省(3) > 海外(2) = 台湾省(2) > 浙江省(1) = 山东省(1)
+	// 台湾视同国内省份：country='台湾' 空省份兜底为「台湾」，country='中国台湾' 按省份段入表，均不计入海外
+	want := []GeoStat{
+		{Country: "台湾", Count: 5},
+		{Country: "其他", Count: 4},
+		{Country: "广东省", Count: 3},
+		{Country: "台湾省", Count: 2},
+		{Country: "海外", Count: 2},
+		{Country: "浙江省", Count: 1},
+		{Country: "山东省", Count: 1},
+	}
+	for i, w := range want {
+		if got := data.GeoDistribution[i]; got != w {
+			t.Fatalf("GeoDistribution[%d] = %+v, want %+v", i, got, w)
+		}
+	}
+}
