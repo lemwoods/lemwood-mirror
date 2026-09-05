@@ -127,11 +127,19 @@ export function BlacklistPage() {
   }, [page, pageSize, filter, keyword])
 
   useEffect(() => {
-    loadBlacklist()
+    // 数据加载延后到定时器回调：effect 体内同步触发会 setState 的函数
+    // 触发 react-hooks/set-state-in-effect 告警（级联渲染风险）
+    const timer = setTimeout(() => {
+      void loadBlacklist()
+    }, 0)
+    return () => clearTimeout(timer)
   }, [loadBlacklist])
 
   useEffect(() => {
-    loadFirewallStatus()
+    const timer = setTimeout(() => {
+      void loadFirewallStatus()
+    }, 0)
+    return () => clearTimeout(timer)
   }, [loadFirewallStatus])
 
   const handleAdd = async (values: { ip: string; reason: string }) => {
