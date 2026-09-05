@@ -13,6 +13,7 @@ import (
 	"lemwood_mirror/internal/db"
 	"lemwood_mirror/internal/download_authz"
 	"lemwood_mirror/internal/firewall"
+	"lemwood_mirror/internal/geoip"
 	"lemwood_mirror/internal/netutil"
 	"lemwood_mirror/internal/pow"
 	"lemwood_mirror/internal/selfupdate"
@@ -697,6 +698,12 @@ func (s *State) Routes(mux *http.ServeMux) {
 				version = parts[1]
 			}
 			fileName = filepath.Base(relPath)
+			// 地区归属：入库前本地解析（内嵌 ip2region，微秒级，不影响传输速率）。
+			// 解析失败或内网/保留地址留空，聚合展示时归入「其他」。
+			country, _, _, ok := geoip.Lookup(clientIP)
+			if !ok {
+				country = ""
+			}
 			if err := db.RecordDownloadEvent(db.DownloadEvent{
 				AuthorizationID: auth.AuthorizationID,
 				FilePath:        relPath,
@@ -704,6 +711,7 @@ func (s *State) Routes(mux *http.ServeMux) {
 				Launcher:        launcher,
 				Version:         version,
 				ClientIP:        clientIP,
+				Country:         country,
 				BytesServed:     counter.Total,
 				Completed:       completed,
 				StatusCode:      countingWriter.statusCode,

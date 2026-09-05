@@ -266,7 +266,8 @@ func TestDaysSinceClamp(t *testing.T) {
 }
 
 // TestQueryGeoDistribution 国内省份聚合 + 海外/未知分别聚合为「海外」「其他」，
-// 响应沿用旧版 geo_distribution 形状（country 字段承载省份名）。
+// region 经 geoip.NormalizeRegion 归一为 34 个一级行政单位简称（全称去缀、
+// 地级市回所属省）；响应沿用旧版 geo_distribution 形状（country 字段承载省份名）。
 func TestQueryGeoDistribution(t *testing.T) {
 	setupStatsTestDB(t)
 
@@ -286,24 +287,24 @@ func TestQueryGeoDistribution(t *testing.T) {
 	data := &StatsData{}
 	queryGeoDistribution(data)
 
-	if len(data.GeoDistribution) != 7 {
-		t.Fatalf("GeoDistribution = %+v, want 7 entries", data.GeoDistribution)
+	if len(data.GeoDistribution) != 6 {
+		t.Fatalf("GeoDistribution = %v, want 6 entries (region 归一 + 兜底合并后无重复条目)", data.GeoDistribution)
 	}
 
-	// 排序按访问量降序：台湾(5) > 其他(4) > 广东省(3) > 海外(2) = 台湾省(2) > 浙江省(1) = 山东省(1)
-	// 台湾视同国内省份：country='台湾' 空省份兜底为「台湾」，country='中国台湾' 按省份段入表，均不计入海外
+	// 归一后口径：全称去「省」为简称；region 段归一后与空省份兜底计数（5）
+	// 合并为同一条目（2+5=7），不再出现重复条目。排序按访问量降序，
+	// 并列时按名称升序（山东 < 浙江）。
 	want := []GeoStat{
-		{Country: "台湾", Count: 5},
+		{Country: "台湾", Count: 7},
 		{Country: "其他", Count: 4},
-		{Country: "广东省", Count: 3},
-		{Country: "台湾省", Count: 2},
+		{Country: "广东", Count: 3},
 		{Country: "海外", Count: 2},
-		{Country: "浙江省", Count: 1},
-		{Country: "山东省", Count: 1},
+		{Country: "山东", Count: 1},
+		{Country: "浙江", Count: 1},
 	}
 	for i, w := range want {
 		if got := data.GeoDistribution[i]; got != w {
-			t.Fatalf("GeoDistribution[%d] = %+v, want %+v", i, got, w)
+			t.Fatalf("GeoDistribution[%d] = %v, want %v", i, got, w)
 		}
 	}
 }

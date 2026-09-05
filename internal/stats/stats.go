@@ -836,31 +836,36 @@ func queryTopDownloads(data *StatsData) {
 
 // queryGeoDistribution 统计国内省份访问分布：国内聚合 country 为 中国/China 以及
 // 含「台湾」的记录（台湾视同国内省份），按 visits.region（ip2region 省份段）分组，
-// region 为空的台湾记录兜底为「台湾」条目；海外国家合并为「海外」，
+// 并归一为 34 个一级行政单位（直辖市/自治区/省/特别行政区，地级市回所属省），
+// region 为空的台湾记录兜底并入归一后的「台湾」计数；海外国家合并为「海外」，
 // Local/空白国家/无省份的未知来源合并为「其他」。响应字段沿用旧版 geo_distribution 形状。
 func queryGeoDistribution(data *StatsData) {
 	rows, err := db.DB.Query(db.Rebind(`
 		SELECT region, COALESCE(SUM(visit_count), 0) as c
 		FROM visits
 		WHERE (country IN ('中国', 'China') OR country LIKE '%台湾%') AND region != ''
-		GROUP BY region
-		ORDER BY c DESC
-		LIMIT 50`))
+		GROUP BY region`))
 	if err != nil {
 		return
 	}
 	defer rows.Close()
 
 	var geos []GeoStat
+	counts := make(map[string]int64)
+	var unmapped int64
 	for rows.Next() {
 		var name string
 		var count int64
 		if err := rows.Scan(&name, &count); err != nil {
 			continue
 		}
-		geos = append(geos, GeoStat{Country: name, Count: count})
+		// 归一为一级行政单位：地级市回所属省，全/简称统一为简称；归一不了的并入「其他」
+		if n := geoip.NormalizeRegion(name); n != "" {
+			counts[n] += count
+		} else {
+			unmapped += count
+		}
 	}
-
 	scanSum := func(query string) int64 {
 		var total int64
 		if err := db.DB.QueryRow(db.Rebind(query)).Scan(&total); err != nil {
@@ -868,11 +873,16 @@ func queryGeoDistribution(data *StatsData) {
 		}
 		return total
 	}
+
+	// region 为空的记录兜底：并入归一后的同名计数，避免出现重复条目
 	if tw := scanSum(`
 		SELECT COALESCE(SUM(visit_count), 0)
 		FROM visits
 		WHERE country LIKE '%台湾%' AND (region = '' OR region IS NULL)`); tw > 0 {
-		geos = append(geos, GeoStat{Country: "台湾", Count: tw})
+		counts["台湾"] += tw
+	}
+	for name, count := range counts {
+		geos = append(geos, GeoStat{Country: name, Count: count})
 	}
 	if overseas := scanSum(`
 		SELECT COALESCE(SUM(visit_count), 0)
@@ -884,11 +894,17 @@ func queryGeoDistribution(data *StatsData) {
 	if unknown := scanSum(`
 		SELECT COALESCE(SUM(visit_count), 0)
 		FROM visits
-		WHERE country = '' OR country = 'Local' OR ((country = '中国' OR country = 'China') AND region = '')`); unknown > 0 {
-		geos = append(geos, GeoStat{Country: "其他", Count: unknown})
+		WHERE country = '' OR country = 'Local' OR ((country = '中国' OR country = 'China') AND region = '')`); unknown+unmapped > 0 {
+		geos = append(geos, GeoStat{Country: "其他", Count: unknown + unmapped})
 	}
 
-	sort.Slice(geos, func(i, j int) bool { return geos[i].Count > geos[j].Count })
+	// 计数相同时按名称升序，保证并列条目顺序确定（兼容旧口径的同时输出可复现）
+	sort.Slice(geos, func(i, j int) bool {
+		if geos[i].Count != geos[j].Count {
+			return geos[i].Count > geos[j].Count
+		}
+		return geos[i].Country < geos[j].Country
+	})
 	data.GeoDistribution = geos
 }
 
