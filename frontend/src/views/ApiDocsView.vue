@@ -1,11 +1,13 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import { PhCopy as Copy, PhCheck as Check, PhBooks as BookOpen, PhPlugs as Plug, PhShieldCheck as Shield } from '@phosphor-icons/vue'
 import { globalConfig } from '@/lib/globalConfig'
+import { useSeoMeta } from '@/composables/useSeoMeta'
 
-onMounted(() => {
-  document.title = `API 文档 - ${globalConfig.site.nameFull}`
-})
+useSeoMeta(
+  { title: 'API 文档' },
+  globalConfig.site.nameFull
+)()
 
 const activeTab = ref('overview')
 const copiedText = ref('')
@@ -176,10 +178,10 @@ curl -LO "${baseUrl}/download/fcl/1.3.0.7/FCL-release.apk?token=<令牌>"`
 
 const methodClass = (type) => {
   const classes = {
-    get: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
-    post: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+    get: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+    post: 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
   }
-  return classes[type] || 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400'
+  return classes[type] || 'bg-slate-500/10 text-slate-600 dark:text-slate-400'
 }
 
 // prepare/authorize 成功响应共用同一结构

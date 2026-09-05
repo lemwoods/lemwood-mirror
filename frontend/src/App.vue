@@ -12,7 +12,8 @@ const route = useRoute()
   <DefaultLayout>
     <RouterView v-slot="{ Component }">
       <Transition name="page" mode="out-in">
-        <component :is="Component" :key="route.path" />
+        <!-- fullPath：同 path 不同 query（如 /verify?file=a → b）也要重建组件 -->
+        <component :is="Component" :key="route.fullPath" />
       </Transition>
     </RouterView>
   </DefaultLayout>

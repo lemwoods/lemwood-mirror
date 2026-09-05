@@ -1,7 +1,6 @@
 export const sponsorConfig = {
   title: '赞助支持',
   description: '每一笔赞助都会直接用于服务器、带宽与存储开销，让镜像站持续免费开放。',
-  afdianLink: '',
   alipayQrCode: new URL('@/assets/images/alipay-sponsor.jpg', import.meta.url).href,
   wechatQrCode: new URL('@/assets/images/wechat-sponsor.png', import.meta.url).href
 }

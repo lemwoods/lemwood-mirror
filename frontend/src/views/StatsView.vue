@@ -10,6 +10,7 @@ import {
   PhChartBar as BarChart3,
   PhGauge as Gauge,
   PhMapPin as MapPin,
+  PhChartPie as ChartPie,
   PhTrendUp as TrendingUp
 } from '@phosphor-icons/vue'
 import Card from '@/components/ui/Card.vue'
@@ -19,9 +20,18 @@ import CardHeader from '@/components/ui/CardHeader.vue'
 import CardTitle from '@/components/ui/CardTitle.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import { getLauncherDisplayName } from '@/lib/launcher-info'
+import { useSeoMeta } from '@/composables/useSeoMeta'
 
-import { use } from 'echarts/core'
-import { BarChart, TreemapChart, LineChart } from 'echarts/charts'
+useSeoMeta(
+  {
+    title: '统计信息',
+    description: `查看${globalConfig.site.name}的访问统计、下载统计和地理分布数据`
+  },
+  globalConfig.site.nameFull
+)()
+
+import { use, registerMap as echartsRegisterMap } from 'echarts/core'
+import { BarChart, LineChart, MapChart, PieChart } from 'echarts/charts'
 import { CanvasRenderer } from 'echarts/renderers'
 import {
   TitleComponent,
@@ -31,9 +41,10 @@ import {
   VisualMapComponent
 } from 'echarts/components'
 import VChart from 'vue-echarts'
+import { toMapProvince, isProvinceFullName } from '@/lib/chinaRegion'
 
 use([
-  CanvasRenderer, BarChart, TreemapChart, LineChart,
+  CanvasRenderer, BarChart, LineChart, MapChart, PieChart,
   TitleComponent, TooltipComponent, LegendComponent, GridComponent, VisualMapComponent
 ])
 
@@ -42,6 +53,31 @@ const bandwidth = ref({})
 const loading = ref(true)
 const isDark = useDark()
 let bandwidthTimer = null
+
+// 带宽轮询：5s 一次（站点级限流 300 req/min/IP，秒级轮询多开页面即触发）；
+// 页面隐藏时暂停，恢复可见时立即刷新并续跑。
+const BANDWIDTH_INTERVAL_MS = 5000
+
+const startBandwidthPolling = () => {
+  if (bandwidthTimer) return
+  bandwidthTimer = setInterval(refreshBandwidth, BANDWIDTH_INTERVAL_MS)
+}
+
+const stopBandwidthPolling = () => {
+  if (bandwidthTimer) {
+    clearInterval(bandwidthTimer)
+    bandwidthTimer = null
+  }
+}
+
+const onVisibilityChange = () => {
+  if (document.hidden) {
+    stopBandwidthPolling()
+  } else {
+    refreshBandwidth()
+    startBandwidthPolling()
+  }
+}
 
 const formatMbps = (v) => {
   if (!Number.isFinite(v)) return '0'
@@ -130,30 +166,101 @@ const crownPaths = [
   'M6 16.5 L12 6.5 L18 16.5 Q12 18.4 6 16.5 Z M5.6 18.6 Q12 20.2 18.4 18.6 L18.4 19.8 Q12 21.4 5.6 19.8 Z'
 ]
 
-// 国内访问分布：矩形树图（面积 = 访问量）。国内按省份展示，后端已把海外/未知来源
-// 合并为「海外」「其他」；占比 < 2% 的省份并入「其他」，避免碎块过多
-const treemapOption = computed(() => {
+// 国内访问分布：中国地图热力图。后端条目含省级简称与地级市，先归一化到省级
+// （城市并入所属省），海外与未知来源不上图；仅展示省级 + 直辖市 + 港澳台。
+// 地图 GeoJSON 已带南海诸岛扩展小图，主图裁掉南海范围避免挤压大陆畸变。
+const chinaMapReady = ref(false)
+
+fetch('/geo/china.json')
+  .then((r) => r.json())
+  .then((geoJson) => {
+    echartsRegisterMap('china', geoJson)
+    chinaMapReady.value = true
+  })
+  .catch((e) => console.error('加载中国地图数据失败', e))
+
+const provinceStats = computed(() => {
+  const items = (stats.value.geo_distribution || []).filter(
+    g => g.country !== '其他' && g.country !== '海外'
+  )
+  const byProvince = new Map()
+  for (const g of items) {
+    const name = isProvinceFullName(g.country) ? g.country : toMapProvince(g.country)
+    if (!name) continue
+    byProvince.set(name, (byProvince.get(name) || 0) + (g.count || 0))
+  }
+  return [...byProvince.entries()]
+    .map(([name, value]) => ({ name, value }))
+    .sort((a, b) => b.value - a.value)
+})
+
+const provinceTotal = computed(() => provinceStats.value.reduce((s, p) => s + p.value, 0) || 1)
+
+const chinaMapOption = computed(() => {
+  if (!chinaMapReady.value) return {}
+  const textColor = isDark.value ? '#a1a1aa' : '#52525b'
+
+  return {
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: isDark.value ? '#18181b' : '#ffffff',
+      borderColor: isDark.value ? '#27272a' : '#e4e4e7',
+      textStyle: { color: isDark.value ? '#fafafa' : '#09090b' },
+      formatter: (params) => {
+        const v = Number(params.value)
+        if (!Number.isFinite(v) || v <= 0) return `<b>${params.name}</b><br/>暂无访问记录`
+        const count = v.toLocaleString()
+        const pct = ((v / provinceTotal.value) * 100).toFixed(1)
+        return `<b>${params.name}</b><br/>访问 ${count} 次 · 占比 ${pct}%`
+      }
+    },
+    visualMap: {
+      min: 0,
+      max: Math.max(...provinceStats.value.map(p => p.value), 1),
+      left: '8px',
+      bottom: '8px',
+      calculable: false,
+      text: ['高', '低'],
+      textStyle: { color: textColor, fontSize: 10 },
+      inRange: {
+        // teal 系低饱和热力色带
+        color: ['#e8fbf7', '#99f6e4', '#2dd4bf', '#14b8a6', '#0d9488', '#0f766e']
+      }
+    },
+    series: [{
+      name: '访问分布',
+      type: 'map',
+      map: 'china',
+      roam: false,
+      // 视图中心对准大陆腹地并放大：大陆撑满容器，南海诸岛自然下沉到容器
+      // 底缘之外（含南海的整幅 bbox 默认适配会把大陆压扁畸变）
+      center: [104.5, 36],
+      zoom: 1.42,
+      selectedMode: false,
+      data: provinceStats.value,
+      emphasis: {
+        label: { show: false },
+        itemStyle: { areaColor: '#f97316' }
+      }
+    }]
+  }
+})
+
+// 省份占比：南丁格尔玫瑰图。占比 <1% 的省份并入「其他」，其余样本全部展示
+const roseOption = computed(() => {
   const textColor = isDark.value ? '#a1a1aa' : '#52525b'
   const gapColor = isDark.value ? '#18181b' : '#ffffff'
+  const palette = ['#0f766e', '#0d9488', '#14b8a6', '#2dd4bf', '#5eead4', '#99f6e4', '#5eb8c9', '#94a3b8', '#a8a29e', '#cbd5e1', '#b9c4d0']
 
-  const geo = [...(stats.value.geo_distribution || [])].sort((a, b) => (b.count || 0) - (a.count || 0))
-  const total = geo.reduce((s, g) => s + (g.count || 0), 0) || 1
-
+  const total = provinceTotal.value
   const main = []
-  let restCount = 0
-  for (const g of geo) {
-    if (g.country === '其他') { restCount += g.count || 0; continue }
-    if (g.country === '海外' || (g.count || 0) / total >= 0.02) { main.push(g); continue }
-    restCount += g.count || 0
+  let tailSum = 0
+  for (const p of provinceStats.value) {
+    if (p.value / total < 0.01) { tailSum += p.value; continue }
+    main.push(p)
   }
-  const data = main.map(g => ({
-    name: g.country,
-    value: g.count || 0
-  }))
-  if (restCount > 0) data.push({ name: '其他', value: restCount })
-
-  // teal 系低饱和色板，末位灰阶给「其他」
-  const palette = ['#0d9488', '#14b8a6', '#2dd4bf', '#5eead4', '#99f6e4', '#94a3b8', '#a8a29e', '#cbd5e1']
+  if (tailSum > 0) main.push({ name: '其他', value: tailSum })
 
   return {
     backgroundColor: 'transparent',
@@ -165,51 +272,26 @@ const treemapOption = computed(() => {
       formatter: (params) => {
         const v = Number(params.value)
         const count = Number.isFinite(v) ? v.toLocaleString() : '0'
-        const pct = (Number.isFinite(v) ? (v / total) * 100 : 0).toFixed(1)
+        const pct = ((v / provinceTotal.value) * 100).toFixed(1)
         return `<b>${params.name}</b><br/>访问 ${count} 次 · 占比 ${pct}%`
       }
     },
     series: [{
-      name: '访问分布',
-      type: 'treemap',
-      data,
-      // 移动端不劫持手势，纯静态展示 + tooltip
-      roam: false,
-      nodeClick: false,
-      breadcrumb: { show: false },
-      left: 0,
-      right: 0,
-      top: 0,
-      bottom: 0,
-      color: palette,
-      itemStyle: {
-        borderColor: gapColor,
-        borderWidth: 2,
-        gapWidth: 2,
-        borderRadius: 6
-      },
-      label: {
-        show: true,
-        color: isDark.value ? '#fafafa' : '#134e4a',
-        fontSize: 11,
-        lineHeight: 15,
-        fontWeight: 600,
-        overflow: 'truncate',
-        formatter: (params) => {
-          const v = Number(params.value)
-          if (!Number.isFinite(v)) return params.name
-          const pct = ((v / total) * 100).toFixed(1)
-          return `${params.name}\n${pct}%`
-        }
-      },
-      emphasis: {
-        label: { show: true },
+      name: '省份占比',
+      type: 'pie',
+      roseType: 'area',
+      radius: ['16%', '78%'],
+      center: ['50%', '52%'],
+      data: main.map((p, i) => ({
+        name: p.name,
+        value: p.value,
         itemStyle: {
-          areaColor: '#f97316',
-          shadowBlur: 12,
-          shadowColor: 'rgba(0, 0, 0, 0.25)'
+          color: p.name === '其他' ? '#94a3b8' : palette[i % palette.length]
         }
-      }
+      })),
+      label: { color: textColor, fontSize: 10, formatter: '{b}' },
+      labelLine: { length: 6, length2: 8, lineStyle: { color: textColor } },
+      itemStyle: { borderRadius: 3, borderColor: gapColor, borderWidth: 1.5 }
     }]
   }
 })
@@ -317,8 +399,8 @@ const trendOption = computed(() => {
         smooth: true,
         symbol: 'none',
         data: movingAvg,
-        lineStyle: { color: '#8b5cf6', width: 1.5, type: 'dashed' },
-        itemStyle: { color: '#8b5cf6' }
+        lineStyle: { color: '#64748b', width: 1.5, type: 'dashed' },
+        itemStyle: { color: '#64748b' }
       },
       // 访问量：细面积线（主体）
       {
@@ -376,19 +458,8 @@ const refreshBandwidth = async () => {
 
 onMounted(async () => {
   try {
-    const [statsRes] = await Promise.all([
-      getStats()
-    ])
+    const statsRes = await getStats()
     stats.value = statsRes.data
-
-    document.title = `统计信息 - ${globalConfig.site.nameFull}`
-    const desc = `查看${globalConfig.site.name}的访问统计、下载统计和地理分布数据`
-    const metaDescription = document.querySelector('meta[name="description"]')
-    const metaOgDescription = document.querySelector('meta[property="og:description"]')
-    const metaTwitterDescription = document.querySelector('meta[property="twitter:description"]')
-    if (metaDescription) metaDescription.setAttribute('content', desc)
-    if (metaOgDescription) metaOgDescription.setAttribute('content', '统计信息 - ' + desc)
-    if (metaTwitterDescription) metaTwitterDescription.setAttribute('content', '统计信息 - ' + desc)
   } catch (e) {
     console.error('Failed to load data', e)
   } finally {
@@ -396,11 +467,13 @@ onMounted(async () => {
   }
 
   await refreshBandwidth()
-  bandwidthTimer = setInterval(refreshBandwidth, 1000)
+  startBandwidthPolling()
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onUnmounted(() => {
-  if (bandwidthTimer) clearInterval(bandwidthTimer)
+  stopBandwidthPolling()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
 
@@ -520,7 +593,7 @@ onUnmounted(() => {
               <Gauge weight="duotone" class="h-4 w-4 text-primary" />
               服务器带宽状态
             </CardTitle>
-            <span class="text-xs text-muted-foreground">每秒自动刷新</span>
+            <span class="text-xs text-muted-foreground">每 5 秒自动刷新</span>
           </CardHeader>
           <CardContent>
             <div class="grid grid-cols-2 gap-4 2xl:grid-cols-3">
@@ -577,17 +650,18 @@ onUnmounted(() => {
       </div>
 
       <div class="grid gap-4 lg:grid-cols-7">
+        <!-- 最近 30 天趋势：与热门排行并排 -->
         <Card class="lg:col-span-4 shadow-sm">
           <CardHeader>
             <CardTitle class="flex items-center gap-2 text-base">
-              <MapPin weight="duotone" class="h-4 w-4 text-primary" />
-              国内访问分布
+              <BarChart3 weight="duotone" class="h-4 w-4 text-orange-500" />
+              最近 30 天趋势
             </CardTitle>
-            <CardDescription>按国内访问来源省份统计，海外与未知来源合并为「海外/其他」展示，面积越大代表访问越多。</CardDescription>
+            <CardDescription>下载柱与访问曲线叠加，7 日均值虚线反映中长期走势。</CardDescription>
           </CardHeader>
           <CardContent class="pl-2">
             <div class="h-[350px] w-full">
-              <VChart class="chart" :option="treemapOption" autoresize />
+              <VChart class="chart" :option="trendOption" autoresize />
             </div>
           </CardContent>
         </Card>
@@ -655,17 +729,47 @@ onUnmounted(() => {
         </Card>
       </div>
 
+      <!-- 访问分布：整行收尾，卡内左「标题+地图」、右「标题+说明+玫瑰图」，两列头部对齐、图表等高 -->
       <Card class="shadow-sm">
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2 text-base">
-            <BarChart3 weight="duotone" class="h-4 w-4 text-orange-500" />
-            最近 30 天趋势
-          </CardTitle>
-            <CardDescription>下载柱与访问曲线叠加，紫色虚线为 7 日均值。</CardDescription>
-        </CardHeader>
-        <CardContent class="pl-2">
-          <div class="h-[350px] w-full">
-            <VChart class="chart" :option="trendOption" autoresize />
+        <CardContent class="grid gap-6 p-5 lg:grid-cols-2 lg:gap-8">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 text-base font-semibold">
+              <MapPin weight="duotone" class="h-4 w-4 text-primary" />
+              国内访问分布
+            </div>
+            <p class="mt-1 text-sm text-muted-foreground">
+              按国内访问来源省份统计，海外合并为「海外」，城市级访问并入所属省份展示。
+            </p>
+            <div class="mt-4">
+              <div v-if="chinaMapReady" class="h-[420px] w-full">
+                <VChart class="chart" :option="chinaMapOption" autoresize />
+              </div>
+              <div v-else class="flex h-[420px] items-center justify-center">
+                <Skeleton class="h-full w-full rounded" />
+              </div>
+            </div>
+          </div>
+
+          <!-- 右列：标题与左列对齐，说明文字右对齐多行小字，玫瑰图与地图等高 -->
+          <div class="flex min-w-0 flex-col">
+            <div class="flex items-center gap-2 text-base font-semibold">
+              <ChartPie weight="duotone" class="h-4 w-4 text-teal-500" />
+              省份访问占比
+            </div>
+            <div class="mt-1 space-y-0.5 text-right">
+              <p class="text-xs leading-relaxed text-muted-foreground">
+                扇区面积对应访问量占比，展示全部省级行政区样本。
+              </p>
+              <p class="text-xs leading-relaxed text-muted-foreground">
+                占比不足 1% 的省份并入「其他」；城市级访问已归并至所属省份。
+              </p>
+              <p class="text-xs leading-relaxed text-muted-foreground">
+                地图仅示意访问热度，不代表任何领土立场；海外及未知来源不在图中展示。
+              </p>
+            </div>
+            <div class="mt-4 min-h-0 flex-1">
+              <VChart class="chart" :option="roseOption" autoresize />
+            </div>
           </div>
         </CardContent>
       </Card>

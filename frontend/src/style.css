@@ -113,9 +113,6 @@
     --radius-2xl: 1rem;
     --radius-3xl: 1.5rem;
     --radius-full: 9999px;
-
-    --backdrop-blur: 0px;
-    --backdrop-opacity: 1;
   }
 
   .dark {

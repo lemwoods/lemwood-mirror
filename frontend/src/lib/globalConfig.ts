@@ -1,11 +1,14 @@
+// __APP_VERSION__ 由 vite.config.js 构建期从 package.json 注入，单一版本源
+declare const __APP_VERSION__: string
+
 export const globalConfig = {
   site: {
     name: '柠泽资源站',
     nameFull: '柠泽资源站状态',
     nameEn: 'Lemwood Mirror',
-    version: '3.15.0',
+    version: __APP_VERSION__,
     description: 'Minecraft 启动器与工具链的高速镜像下载服务',
-    url: 'https://miawa.cn/',
+    url: import.meta.env.VITE_SITE_URL || 'https://miawa.cn/',
     language: 'zh-CN',
     author: 'Lemwood & YanSui'
   },

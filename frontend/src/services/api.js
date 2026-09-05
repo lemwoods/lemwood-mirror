@@ -5,10 +5,12 @@ const api = axios.create({
     baseURL: globalConfig.api.baseUrl
 })
 
-// v2 信封解包：将 response.data.data 提升到 response.data
+// v2 信封解包：仅当业务成功（error 为 null）时将 response.data.data 提升到 response.data；
+// 业务错误（data=null, error={...}）保持原信封不动，调用方可读 error 字段提示。
 api.interceptors.response.use((response) => {
-    if (response.data && typeof response.data === 'object' && 'data' in response.data && 'meta' in response.data) {
-        response.data = response.data.data
+    const body = response.data
+    if (body && typeof body === 'object' && 'data' in body && 'meta' in body && body.error === null) {
+        response.data = body.data
     }
     return response
 })

@@ -3,6 +3,13 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getDownloadLanding } from '@/services/api'
 import { globalConfig } from '@/lib/globalConfig'
+import { isAllowedExternalTarget } from '@/lib/returnTarget'
+import { useSeoMeta } from '@/composables/useSeoMeta'
+
+useSeoMeta(
+  { title: '下载已开始' },
+  globalConfig.site.nameFull
+)()
 import {
   PhDownloadSimple as Download,
   PhHouse as Home,
@@ -26,7 +33,6 @@ const loading = ref(true)
 const error = ref('')
 const fileInfo = ref(null)
 const downloadTriggered = ref(false)
-const downloadTarget = ref('')
 
 const loadLandingInfo = async () => {
   const token = route.query.token
@@ -39,73 +45,62 @@ const loadLandingInfo = async () => {
   try {
     const response = await getDownloadLanding(token)
     fileInfo.value = response.data
-    downloadTarget.value = response.data.download_url || ''
     triggerDownload()
   } catch (err) {
-    error.value = err.response?.data?.message || '获取下载信息失败，凭证可能已过期'
+    error.value = err.response?.data?.error?.message || err.message || '获取下载信息失败，凭证可能已过期'
   } finally {
     loading.value = false
   }
 }
 
-const triggerDownload = () => {
-  if (downloadTriggered.value || !fileInfo.value?.download_url) return
-  downloadTriggered.value = true
-  if (downloadTarget.value) {
-    window.location.href = downloadTarget.value
-  }
-}
+// HEAD 探测同源下载路径可达性（不带 token：后端对 HEAD 分支不校验、不记账），
+// 探测通过才自动触发下载；失败则保留手动按钮引导，避免整页导航到异常流。
+const PROBE_TIMEOUT_MS = 5000
 
-// 返回来源网站（集成站）：优先外部 referrer，其次外部 return_url，兜底首页。
-// 不 router.back() 回验证页。
-const goBack = () => {
-  const externalReferrer = getExternalReferrer()
-  if (externalReferrer) {
-    window.location.href = externalReferrer
-    return
-  }
-  const returnUrl = route.query.return_url || fileInfo.value?.return_url
-  if (returnUrl && isExternal(returnUrl)) {
-    window.location.href = returnUrl
-    return
-  }
-  router.push('/')
-}
-
-const goToWebsite = () => {
-  const externalReferrer = getExternalReferrer()
-  if (externalReferrer) {
-    window.location.href = externalReferrer
-    return
-  }
-  const returnUrl = route.query.return_url || fileInfo.value?.return_url
-  if (returnUrl && isExternal(returnUrl)) {
-    window.location.href = returnUrl
-    return
-  }
-  router.push('/')
-}
-
-// getExternalReferrer 返回外部来源站点 URL（不同源才返回，避免回到本站）。
-const getExternalReferrer = () => {
-  const ref = document.referrer
-  if (ref && isExternal(ref)) {
-    return ref
-  }
-  return ''
-}
-
-// isExternal 判断 URL 是否来自其他源（站外）。
-const isExternal = (url) => {
+const probeDownloadPath = async (downloadUrl) => {
   try {
-    return new URL(url, window.location.origin).origin !== window.location.origin
-  } catch (e) {
+    const path = new URL(downloadUrl, window.location.origin).pathname
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
+    try {
+      const res = await fetch(path, { method: 'HEAD', signal: controller.signal })
+      return res.ok
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch {
     return false
   }
 }
 
+const triggerDownload = async () => {
+  if (downloadTriggered.value || !fileInfo.value?.download_url) return
+  downloadTriggered.value = true
+  if (await probeDownloadPath(fileInfo.value.download_url)) {
+    window.location.href = fileInfo.value.download_url
+  }
+}
+
+// 返回来源站点（集成站）：外部 referrer / return_url 均需命中白名单（防开放重定向），
+// 否则回退首页；不 router.back() 回验证页。
+const leaveToOrigin = () => {
+  const referrer = document.referrer
+  if (referrer && isAllowedExternalTarget(referrer)) {
+    window.location.href = referrer
+    return
+  }
+  const returnUrl = route.query.return_url || fileInfo.value?.return_url
+  if (returnUrl && isAllowedExternalTarget(returnUrl)) {
+    window.location.href = returnUrl
+    return
+  }
+  router.push('/')
+}
+
+const goBack = leaveToOrigin
+const goToWebsite = leaveToOrigin
+
 onMounted(() => {
-  document.title = `下载已开始 - ${globalConfig.site.nameFull}`
   loadLandingInfo()
 })
 </script>
@@ -144,7 +139,7 @@ onMounted(() => {
         <div v-else class="space-y-5">
           <!-- 真实 <a> 用户手势触发下载：Chrome/Android 会拦截非手势的自动下载 -->
           <a
-            :href="downloadTarget || fileInfo.download_url"
+            :href="fileInfo.download_url"
             :download="fileInfo.file_name || undefined"
             class="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
           >
