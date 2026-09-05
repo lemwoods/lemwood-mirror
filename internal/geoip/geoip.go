@@ -88,5 +88,38 @@ func normalize(s string) string {
 	if s == "0" || s == "null" || s == "Reserved" || s == "" {
 		return ""
 	}
+	if cn, ok := zhCountry[s]; ok {
+		return cn
+	}
 	return s
+}
+
+// zhCountry 把新版 xdb 数据里的英文国家名归一到与历史数据一致的中文口径。
+var zhCountry = map[string]string{
+	"United States":        "美国",
+	"United Kingdom":       "英国",
+	"Hong Kong":            "香港",
+	"Taiwan":               "台湾省",
+	"Singapore":            "新加坡",
+	"Japan":                "日本",
+	"South Korea":          "韩国",
+	"Korea":                "韩国",
+	"Germany":              "德国",
+	"France":               "法国",
+	"Russia":               "俄罗斯",
+	"Canada":               "加拿大",
+	"Australia":            "澳大利亚",
+	"India":                "印度",
+	"Netherlands":          "荷兰",
+	"Malaysia":             "马来西亚",
+	"Thailand":             "泰国",
+	"Vietnam":              "越南",
+	"Philippines":          "菲律宾",
+	"Indonesia":            "印尼",
+	"Brazil":               "巴西",
+	"Italy":                "意大利",
+	"Spain":                "西班牙",
+	"Sweden":               "瑞典",
+	"Switzerland":          "瑞士",
+	"United Arab Emirates": "阿联酋",
 }

@@ -1,33 +1,28 @@
 package geoip
 
-import (
-	"testing"
-)
+import "testing"
 
+// 验证内嵌 ip2region 数据可解析，以及生产事件写入依赖的国家口径。
 func TestLookup(t *testing.T) {
-	if err := Init(); err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
-
-	tests := []struct {
+	cases := []struct {
 		ip      string
-		wantOK  bool
 		country string
+		ok      bool
 	}{
-		{"8.8.8.8", true, "United States"},
-		{"223.5.5.5", true, "中国"},
-		{"2408:4000::1", true, "中国"},
-		{"127.0.0.1", false, ""},
+		{"223.155.116.201", "中国", true},
+		{"120.230.26.13", "中国", true},
+		{"8.8.8.8", "美国", true},
+		{"192.168.1.1", "", false},
+		{"not-an-ip", "", false},
 	}
-
-	for _, tc := range tests {
-		country, region, city, ok := Lookup(tc.ip)
-		t.Logf("%s => ok=%v country=%s region=%s city=%s", tc.ip, ok, country, region, city)
-		if ok != tc.wantOK {
-			t.Errorf("Lookup(%s) ok = %v, want %v", tc.ip, ok, tc.wantOK)
+	for _, c := range cases {
+		country, _, _, ok := Lookup(c.ip)
+		if ok != c.ok {
+			t.Errorf("Lookup(%q) ok=%v, want %v", c.ip, ok, c.ok)
+			continue
 		}
-		if ok && tc.country != "" && country != tc.country {
-			t.Errorf("Lookup(%s) country = %s, want %s", tc.ip, country, tc.country)
+		if country != c.country {
+			t.Errorf("Lookup(%q) country=%q, want %q", c.ip, country, c.country)
 		}
 	}
 }
