@@ -11,6 +11,7 @@ import {
   PhXCircle as XCircle
 } from '@phosphor-icons/vue'
 import { getPowConfig, createDownloadChallenge, authorizeDownload } from '@/services/api'
+import { base64urlDecode, base64urlEncode, leadingZeroBits } from '@/lib/pow'
 import { globalConfig } from '@/lib/globalConfig'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
@@ -32,38 +33,7 @@ const verifyStatus = ref('pending') // pending | error
 
 let cancelled = false
 
-// ---- base64url 与 PBKDF2 求解（与后端 internal/pow 协议一致） ----
-
-const base64urlDecode = (s) => {
-  s = s.replace(/-/g, '+').replace(/_/g, '/')
-  while (s.length % 4) s += '='
-  const bin = atob(s)
-  const a = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i)
-  return a
-}
-
-const base64urlEncode = (bytes) => {
-  let b = ''
-  for (let i = 0; i < bytes.length; i++) b += String.fromCharCode(bytes[i])
-  return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-const leadingZeroBits = (bytes) => {
-  let bits = 0
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i]
-    if (b === 0) {
-      bits += 8
-      continue
-    }
-    for (let j = 7; j >= 0; j--) {
-      if (b & (1 << j)) return bits
-      bits++
-    }
-  }
-  return bits
-}
+// ---- PBKDF2 求解（编解码与零位统计见 lib/pow.js，与后端 internal/pow 协议一致） ----
 
 // 迭代 counter，直到 PBKDF2 派生密钥的前导零位数满足难度要求。
 const solve = async (params, onProgress) => {

@@ -1,18 +1,19 @@
 # lemwood-mirror 前端（frontend/）记忆
 
-柠泽资源站前端。Vue 3（`<script setup>` SFC）+ Vite 5 + Vue Router 4（history 模式）+ Tailwind 3 + PrimeVue 4 + Radix Vue。后端是仓库根目录的 Go 单体（本前端是其一叶），仓库整体 AGENTS.md 在根目录，含后端/构建/部署全貌，读本文件前先看根 AGENTS.md。
+柠泽资源站前端。Vue 3（`<script setup>` SFC）+ Vite 5 + Vue Router 4（history 模式）+ Tailwind 3 + Radix Vue。后端是仓库根目录的 Go 单体（本前端是其一叶），仓库整体 AGENTS.md 在根目录，含后端/构建/部署全貌，读本文件前先看根 AGENTS.md。
 
 ## 构建与命令
 
-- 前端自身约定用 **npm**（`package.json` 的 `_packageManager: npm`、README 命令都是 npm）：`npm install`、`npm run dev`、`npm run build`、`npm run typecheck`（`vue-tsc --noEmit`）、`npm run preview`。git 只提交 `pnpm-lock.yaml`（npm 的 package-lock.json 被 .gitignore），CI 与 Docker 走 pnpm——两种包管理器都可用，别因 lockfile 冲突卡住。
+- 前端自身约定用 **npm**（`package.json` 的 `_packageManager: npm`、README 命令都是 npm）：`npm install`、`npm run dev`、`npm run build`、`npm run typecheck`（`vue-tsc --noEmit`）、`npm run test`（vitest run，tests/ 目录 25 个用例）、`npm run preview`。git 只提交 `pnpm-lock.yaml`（npm 的 package-lock.json 被 .gitignore），CI 与 Docker 走 pnpm——两种包管理器都可用，别因 lockfile 冲突卡住。
 - **`npm run build` 输出到仓库根 `../web/default/`**（`vite.config.js` 的 `outDir: '../web/default'` + `emptyOutDir`）。该目录被 git 跟踪且内嵌进 Go 二进制（启动时释放）。改前端代码后必须重新构建，否则线上不生效；构建会重写 git 跟踪的产物文件。
-- 改 Vue/TS 后先跑 `npm run typecheck`。仓库没有单元测试/Playwright 配置（`playwright` 在 devDeps 但无 config/spec），验证靠 typecheck + 手动 dev。
+- 改 Vue/TS 后先跑 `npm run typecheck`，再跑 `npm run test`。测试框架是 vitest（`vitest.config.js` 与 vite.config 同步维护 `@` 别名与 `__APP_VERSION__` define），用例在 `tests/*.test.js`（node 环境，依赖 window 的模块在测试里 stub）。
 
 ## 目录与入口
 
 - `src/main.js` — 入口；`src/App.vue` — 根组件；`src/router/index.js` — 路由（history 模式，后端必须有 SPA 回退）。
-- `src/lib/globalConfig.ts` — **站点/启动器/API 配置中心**：`api.baseUrl`、`api.endpoints`、`launchers`（启动器显示名与 logo）、`theme`、`storage.keys`。改端点/文案/新增启动器优先改这里。`src/lib/launcher-info.ts` 据此提供显示名查询。
-- `src/services/api.js` — axios 单例 + **v2 信封解包拦截器**：响应含 `data` 和 `meta` 字段时自动把 `response.data.data` 提升为 `response.data`。因此导出的 API 函数返回的是**内层数据而非 axios 响应**，别重复 `.data.data`。
+- `src/lib/globalConfig.ts` — **站点/启动器/API 配置中心**：`api.baseUrl`、`api.endpoints`、`launchers`（启动器显示名与 logo）、`storage.keys`。改端点/文案/新增启动器优先改这里。`src/lib/launcher-info.ts` 据此提供显示名查询。`site.version` 取自构建期注入的 `__APP_VERSION__`（vite.config/vitest.config 从 package.json 读，单一版本源）；`site.url` 取 `VITE_SITE_URL`（index.html 的 og:url/twitter:url 同源注入）。
+- `src/lib/` 其他模块：`pow.js`（PoW base64url 编解码 + leadingZeroBits，VerifyView 引用）、`format.js`（formatSize + compareVersionDesc 数值语义版本降序，VersionList/FilesView 共用）、`returnTarget.js`（外部跳转域名白名单）、`composables/useSeoMeta.js`（title/description/og/twitter meta 统一写入，各视图接入）。
+- `src/services/api.js` — axios 单例 + **v2 信封解包拦截器**：响应含 `data`/`meta` 且 `error === null` 时才把 `response.data.data` 提升为 `response.data`（业务错误信封原样保留）。因此导出的 API 函数返回的是**内层数据而非 axios 响应**，别重复 `.data.data`。
 - `src/views/` 页面 + `src/components/`（含 `layout/`、`ui/`，ui 是 Radix Vue + Tailwind 的 shadcn 风格组件）。
 - `src/assets/world.json` — 约 1MB 的静态世界数据。
 - `src/style.css` + `tailwind.config.js` — 全局样式/主题。
@@ -21,13 +22,13 @@
 
 - 语言混杂：`main.js`/`api.js`/`router/index.js`/大部分 `.vue` 用 JS，`globalConfig.ts`/`launcher-info.ts` 是 TS。改 TS 注意 `tsconfig.json` 的 `@/*` 别名与 `strict`。
 - API 端点统一在 `globalConfig.api.endpoints` 声明（`/pow/config`、`/downloads/challenge`、`/downloads/authorize`、`/downloads/prepare`、`/downloads/landing`），不要散落硬编码路径。
-- 环境变量：`.env.production` 是 `VITE_API_BASE_URL=/api/v2`，`.env.development` 是 `/api/v1`；`globalConfig.api.baseUrl` 用 `import.meta.env.VITE_API_BASE_URL || '/api/v2'`。`vite.config.js` 配置了 dev 代理：`/api` → `https://miawa.cn`（changeOrigin，2026-09-02 加），dev 下 API 请求走线上站点联调，无跨域问题（已实测 `/api/v2/stats` 返回线上数据）；如需指向本地后端改 proxy target 即可。
+- 环境变量：`.env.production` 与 `.env.development` 均为 `VITE_API_BASE_URL=/api/v2` + `VITE_SITE_URL`（dev 是 localhost:5173）；`globalConfig.api.baseUrl` 用 `import.meta.env.VITE_API_BASE_URL || '/api/v2'`。`vite.config.js` 配置了 dev/preview 代理：`/api/v1`、`/api/v2`、`/download` 三条精确前缀 → `VITE_PROXY_TARGET`（默认 `https://miawa.cn`，changeOrigin），dev 下 API 请求走线上站点联调，无跨域问题；如需指向本地后端设置 `VITE_PROXY_TARGET` 即可，不要改代理 key 为宽泛的 `/api`（会劫持 `/apidocs` SPA 路由）。
 
 ## 下载/PoW 链路（与后端 internal/pow + download_events 配套）
 
 - 浏览器直连下载：`VersionList.vue`/`FilesView.vue` 的 `handleDownload` 在 `powConfig.enabled` 时路由到 `/verify?file=...`（`VerifyView.vue`），否则走 `prepareDownload`（CLI/API 路径，无 PoW）。
 - `VerifyView.vue`：Web Crypto PBKDF2-SHA256 求解（Web Crypto API `importKey`/`deriveBits`），`derivedKey` 用**无填充** base64url 编码（与后端 `base64.RawURLEncoding` 约定一致），成功后跳 `/download-started?token=...`。
-- `DownloadStartedView.vue`：最终落点。`pickDownloadUrl` 对 `download_urls` 候选（CDN 优先）逐个发 **HEAD 请求**探测可达性（5s 超时 AbortController），失败自动退回同源直连。**HEAD 探测不带 token**（后端对 HEAD 分支不校验、不记账、不写事件）；不要改成带 token 的 GET/Range 探测。
+- `DownloadStartedView.vue`：最终落点。landing 返回单个同源 `download_url`（`/download/...?token=...`）；触发自动下载前先对路径发 **HEAD 请求**探测可达性（5s 超时 AbortController），失败则不自动跳转、仅保留手动按钮。**HEAD 探测不带 token**（后端对 HEAD 分支不校验、不记账、不写事件）；不要改成带 token 的 GET/Range 探测。「返回上一页/前往网站」的外部跳转经 `lib/returnTarget.js` 白名单校验（site.url + 友链域名），防开放重定向（2026-09-05 加）。
 - `globalConfig.download.sourceLabels` 用于 `prepareDownload` 的 `source` 上报（home/files/verify）。
 
 ## 样式

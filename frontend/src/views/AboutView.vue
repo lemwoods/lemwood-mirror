@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed } from 'vue'
 import {
   PhCode as Code,
   PhArrowSquareOut as ExternalLink,
@@ -14,6 +14,7 @@ import {
 import Button from '@/components/ui/Button.vue'
 import FriendLinks from '@/components/FriendLinks.vue'
 import { globalConfig } from '@/lib/globalConfig'
+import { useSeoMeta } from '@/composables/useSeoMeta'
 import {
   sponsors,
   sponsorConfig,
@@ -34,16 +35,13 @@ const sortedSponsors = computed(() => {
   })
 })
 
-onMounted(() => {
-  document.title = `关于 - ${globalConfig.site.nameFull}`
-  const desc = `了解${globalConfig.site.name}背后的团队、技术栈和项目故事`
-  const metaDescription = document.querySelector('meta[name="description"]')
-  const metaOgDescription = document.querySelector('meta[property="og:description"]')
-  const metaTwitterDescription = document.querySelector('meta[property="twitter:description"]')
-  if (metaDescription) metaDescription.setAttribute('content', desc)
-  if (metaOgDescription) metaOgDescription.setAttribute('content', '关于 - ' + desc)
-  if (metaTwitterDescription) metaTwitterDescription.setAttribute('content', '关于 - ' + desc)
-})
+useSeoMeta(
+  {
+    title: '关于',
+    description: `了解${globalConfig.site.name}背后的团队、技术栈和项目故事`
+  },
+  globalConfig.site.nameFull
+)()
 </script>
 
 <template>
@@ -165,17 +163,6 @@ onMounted(() => {
           </div>
           <p class="mt-2 text-center text-xs text-muted-foreground">扫码赞助</p>
         </div>
-
-        <div v-if="sponsorConfig.afdianLink" class="sm:col-span-2">
-          <a :href="sponsorConfig.afdianLink" target="_blank" rel="noopener noreferrer"
-            class="afdian-rainbow-ring relative flex overflow-hidden rounded-lg p-[2px] font-semibold text-white transition-transform hover:scale-[1.005]">
-            <span class="flex w-full items-center justify-center gap-2 rounded-[7px] bg-black py-3 text-sm transition-colors hover:bg-zinc-900">
-              <Zap weight="duotone" class="h-4 w-4" />
-              爱发电赞助
-            </span>
-          </a>
-          <p class="mt-1.5 text-center text-xs text-muted-foreground">支持月付和一次性赞助</p>
-        </div>
       </div>
 
       <div class="rounded-lg border bg-card shadow-sm">
@@ -250,19 +237,3 @@ onMounted(() => {
   </div>
 </template>
 
-<style scoped>
-.afdian-rainbow-ring {
-  background: linear-gradient(90deg, #ec4899, #a855f7, #06b6d4, #22c55e, #f59e0b, #ec4899);
-  background-size: 300% 100%;
-  animation: afdian-rainbow-flow 4s linear infinite;
-}
-
-@keyframes afdian-rainbow-flow {
-  from { background-position: 0% 50%; }
-  to { background-position: 300% 50%; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .afdian-rainbow-ring { animation: none; }
-}
-</style>

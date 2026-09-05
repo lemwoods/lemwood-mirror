@@ -22,6 +22,7 @@ import {
 import { useClipboard } from '@vueuse/core'
 import { getStatus, getLatest, getPowConfig, prepareDownload } from '@/services/api'
 import { getLauncherDisplayName } from '@/lib/launcher-info'
+import { compareVersionDesc, formatSize } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { globalConfig } from '@/lib/globalConfig'
 import { openBlankTab } from '@/lib/safeStorage'
@@ -46,7 +47,18 @@ const route = useRoute()
 const router = useRouter()
 const currentPath = ref([])
 
+// 浏览会话内缓存 /launchers + /latest + /pow/config：路由深度导航会因
+// key=path 变化重建组件，避免每次都全量重拉三接口（配合后端 ETag 语义）。
+const dataCache = { launchers: null, latest: null, pow: null }
+
 const loadData = async () => {
+  if (dataCache.launchers && dataCache.latest && dataCache.pow) {
+    launchers.value = dataCache.launchers
+    latestData.value = dataCache.latest
+    powConfig.value = dataCache.pow
+    loading.value = false
+    return
+  }
   loading.value = true
   try {
     const [statusRes, latestRes, powRes] = await Promise.all([
@@ -59,11 +71,12 @@ const loadData = async () => {
     Object.keys(statusRes.data)
       .sort()
       .forEach((key) => {
-        sortedLaunchers[key] = statusRes.data[key].sort((a, b) =>
-          String(b.tag_name || b.name).localeCompare(String(a.tag_name || a.name))
-        )
+        sortedLaunchers[key] = statusRes.data[key].sort(compareVersionDesc)
       })
 
+    dataCache.launchers = sortedLaunchers
+    dataCache.latest = latestRes.data
+    dataCache.pow = powRes.data
     launchers.value = sortedLaunchers
     latestData.value = latestRes.data
     powConfig.value = powRes.data
@@ -109,18 +122,6 @@ const formatDate = (dateString) => {
   } catch {
     return dateString
   }
-}
-
-const formatSize = (bytes) => {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB']
-  let i = 0
-  let size = bytes
-  while (size >= 1024 && i < units.length - 1) {
-    size /= 1024
-    i++
-  }
-  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
 }
 
 const copyUrl = (url) => copy(url)
@@ -260,6 +261,7 @@ const currentItems = computed(() => {
 
 onMounted(async () => {
   await loadData()
+  applyFilesMeta()
 
   if (props.launcherName && launchers.value[props.launcherName]) {
     currentPath.value = [
@@ -288,13 +290,13 @@ onMounted(async () => {
 })
 
 watch([() => props.launcherName, () => props.versionName, currentPath], () => {
-  updateMetaInfo()
+  applyFilesMeta()
 }, { deep: true })
 
-const updateMetaInfo = () => {
-  const nameFull = globalConfig.site.nameFull
-  const baseTitle = `文件列表 - ${nameFull}`
-  let title = baseTitle
+const nameFull = globalConfig.site.nameFull
+
+const applyFilesMeta = () => {
+  let title = '文件列表'
   let description = '浏览和下载 Minecraft 启动器版本文件'
 
   if (currentPath.value.length === 1) {
@@ -308,19 +310,7 @@ const updateMetaInfo = () => {
     description = `下载 ${launcher.name} ${version.name} 版本的资源文件`
   }
 
-  document.title = title
-
-  const metaDescription = document.querySelector('meta[name="description"]')
-  const metaOgTitle = document.querySelector('meta[property="og:title"]')
-  const metaOgDescription = document.querySelector('meta[property="og:description"]')
-  const metaTwitterTitle = document.querySelector('meta[property="twitter:title"]')
-  const metaTwitterDescription = document.querySelector('meta[property="twitter:description"]')
-
-  if (metaDescription) metaDescription.setAttribute('content', description)
-  if (metaOgTitle) metaOgTitle.setAttribute('content', title)
-  if (metaOgDescription) metaOgDescription.setAttribute('content', description)
-  if (metaTwitterTitle) metaTwitterTitle.setAttribute('content', title)
-  if (metaTwitterDescription) metaTwitterDescription.setAttribute('content', description)
+  useSeoMeta({ title, description, fullTitle: true }, nameFull)()
 }
 </script>
 

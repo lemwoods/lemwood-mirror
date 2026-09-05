@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { PhFolder as Folder, PhPackage as Package } from '@phosphor-icons/vue'
 import { getStatus } from '@/services/api'
+import { compareVersionDesc } from '@/lib/format'
 import { globalConfig } from '@/lib/globalConfig'
 import Card from '@/components/ui/Card.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
@@ -37,7 +38,8 @@ const loadData = async () => {
     const statusRes = await getStatus()
     const data = statusRes.data
     for (const key in data) {
-      data[key].sort((a, b) => String(b.tag_name || b.name).localeCompare(String(a.tag_name || a.name)))
+      // 数值语义降序（1.10.0 > 1.9.0），见 lib/format.js
+      data[key].sort(compareVersionDesc)
     }
     rawLaunchers.value = data
   } catch (error) {

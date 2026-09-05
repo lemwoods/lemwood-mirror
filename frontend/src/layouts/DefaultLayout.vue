@@ -51,17 +51,21 @@ onMounted(() => {
   applyDisplayMode(displayMode.value)
 
   // 未显式设置显示模式时，跟随系统深浅色变化
-  const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-  mediaQuery.addEventListener('change', () => {
-    applyDisplayMode(displayMode.value)
-  })
+  mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+  mediaQuery.addEventListener('change', onSystemColorSchemeChange)
 
   onWindowScroll()
   window.addEventListener('scroll', onWindowScroll, { passive: true })
 })
 
+let mediaQuery = null
+const onSystemColorSchemeChange = () => {
+  applyDisplayMode(displayMode.value)
+}
+
 onUnmounted(() => {
   window.removeEventListener('scroll', onWindowScroll)
+  mediaQuery?.removeEventListener('change', onSystemColorSchemeChange)
 })
 </script>
 

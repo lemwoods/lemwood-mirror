@@ -1,31 +1,27 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "3.14.6",
+  "version": "3.15.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@phosphor-icons/vue": "^2.2.1",
-    "@primeuix/themes": "^2.0.3",
     "@vueuse/core": "^10.9.0",
     "axios": "^1.6.0",
-    "chart.js": "^4.4.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "echarts": "^5.5.0",
-    "highlight.js": "^11.11.1",
-    "primeicons": "^7.0.0",
-    "primevue": "^4.5.5",
     "radix-vue": "^1.9.17",
     "tailwind-merge": "^3.6.0",
     "tailwindcss-animate": "^1.0.7",
     "vue": "^3.4.0",
-    "vue-chartjs": "^5.3.0",
     "vue-echarts": "^6.6.0",
     "vue-router": "^4.3.0"
   },
@@ -33,14 +29,12 @@
     "@tailwindcss/typography": "^0.5.19",
     "@vitejs/plugin-vue": "^5.0.0",
     "autoprefixer": "^10.4.18",
-    "playwright": "^1.60.0",
     "postcss": "^8.4.35",
-    "sass": "^1.71.1",
     "tailwindcss": "^3.4.1",
     "typescript": "^6.0.3",
     "vite": "^5.1.0",
-    "vue-tsc": "^3.3.2",
-    "ws": "^8.21.0"
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.3.2"
   },
   "_packageManager": "npm@11.12.1"
 }

@@ -4,8 +4,7 @@ import AppDialog from '@/components/ui/AppDialog.vue'
 import {
   announcementConfig,
   hasSeenAnnouncement,
-  markAnnouncementAsSeen,
-  resetAnnouncement
+  markAnnouncementAsSeen
 } from '@/lib/announcementConfig'
 
 const isOpen = ref(false)
@@ -22,15 +21,6 @@ const closeDialog = () => {
   isOpen.value = false
   markAnnouncementAsSeen()
 }
-
-const forceShowAnnouncement = () => {
-  resetAnnouncement()
-  isOpen.value = true
-}
-
-defineExpose({
-  forceShowAnnouncement
-})
 </script>
 
 <template>
